@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nhắc Nhở Chấm Công</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>⏰ Nhắc Nhở Chấm Công</h1>
+        </header>
+
+        <main>
+            <!-- Trạng thái chấm công -->
+            <div class="timekeeping-status">
+                <div class="status-header">
+                    <span>📊 Trạng thái hôm nay</span>
+                    <button class="refresh-btn" id="refresh-btn" title="Làm mới">🔄</button>
+                </div>
+                <div class="status-content" id="timekeeping-status">
+                    <div class="loading">Đang tải...</div>
+                </div>
+                <button class="fastwork-btn" id="open-fastwork">🌐 Mở FastWork</button>
+            </div>
+
+            <!-- Nhắc nhở buổi trưa -->
+            <div class="reminder-card">
+                <div class="reminder-header">
+                    <span class="reminder-icon">🌞</span>
+                    <span class="reminder-title">Buổi Trưa (Ra ăn trưa)</span>
+                    <label class="switch">
+                        <input type="checkbox" id="noon-enabled" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="reminder-time">
+                    <input type="time" id="noon-time" value="12:00">
+                </div>
+                <button class="test-btn" id="test-noon">🔔 Test Thông Báo</button>
+            </div>
+
+            <!-- Nhắc nhở buổi chiều -->
+            <div class="reminder-card">
+                <div class="reminder-header">
+                    <span class="reminder-icon">🌙</span>
+                    <span class="reminder-title">Buổi Chiều (Ra về)</span>
+                    <label class="switch">
+                        <input type="checkbox" id="evening-enabled" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="reminder-time">
+                    <input type="time" id="evening-time" value="17:00">
+                </div>
+                <button class="test-btn" id="test-evening">🔔 Test Thông Báo</button>
+            </div>
+
+            <!-- Nút lưu -->
+            <button class="save-btn" id="save-btn">💾 Lưu Cài Đặt</button>
+
+            <!-- Trạng thái -->
+            <div class="status" id="status"></div>
+        </main>
+
+        <footer>
+            <p>💡 Chỉ nhắc khi bạn chưa chấm công!</p>
+        </footer>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+
+</html>
