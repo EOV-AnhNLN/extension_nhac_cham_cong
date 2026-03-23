@@ -14,6 +14,9 @@ let pendingNotifications = {
 // Lưu ID popup window đang mở
 let reminderWindowId = null;
 
+// Lưu ID cửa sổ ẩn để fetch dữ liệu FastWork ngầm
+let hiddenFetchWindowId = null;
+
 // Lưu trữ dữ liệu chấm công
 let timekeepingData = {
   date: null,
@@ -161,6 +164,9 @@ async function resetForNewDay() {
       reminderWindowId = null;
     }
 
+    // Đóng cửa sổ ẩn fetch nếu có
+    closeHiddenFetchWindow();
+
     // Xóa notification hệ thống cũ
     chrome.notifications.clear('noon-reminder');
     chrome.notifications.clear('evening-reminder');
@@ -253,7 +259,7 @@ function showSystemNotification(type) {
     },
     evening: {
       title: '⏰ Nhắc Nhở Chấm Công',
-      message: 'Đã 17:00 - Đừng quên chấm công ra về!'
+      message: 'Đã 17:00 - Đừng về trễ nhaaaa!'
     }
   };
 
@@ -288,6 +294,16 @@ chrome.notifications.onClosed.addListener((notificationId, byUser) => {
     } else if (notificationId.startsWith('evening')) {
       dismissReminder('evening');
     }
+  }
+});
+
+// Dọn dẹp khi cửa sổ bị đóng
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (windowId === reminderWindowId) {
+    reminderWindowId = null;
+  }
+  if (windowId === hiddenFetchWindowId) {
+    hiddenFetchWindowId = null;
   }
 });
 
@@ -356,27 +372,237 @@ async function recheckAfterDismiss(type) {
   }
 }
 
+// Helper: đợi tab load xong sau khi reload
+function waitForTabLoad(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(false); // timeout
+    }, timeoutMs);
+
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === 'complete') {
+        clearTimeout(timeout);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(true);
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// Helper: lấy data từ tab sau khi đảm bảo content script đã chạy
+async function getDataFromTab(tabId, retries = 3, delayMs = 1500) {
+  for (let i = 0; i < retries; i++) {
+    await new Promise(r => setTimeout(r, delayMs));
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        action: 'getTimekeepingData'
+      });
+      if (response && response.found) {
+        return response;
+      }
+    } catch (e) { /* content script chưa sẵn sàng, thử lại */ }
+  }
+  return null;
+}
+
+// Helper: đảm bảo tab đang ở đúng URL chấm công, nếu không thì navigate về
+async function ensureTimekeepingUrl(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.url && tab.url.includes('/timekeepingpersonal')) {
+      // Đúng URL rồi → reload
+      await chrome.tabs.reload(tabId);
+    } else {
+      // Sai URL → navigate về trang chấm công
+      await chrome.tabs.update(tabId, { url: FASTWORK_URL });
+    }
+    return await waitForTabLoad(tabId);
+  } catch (e) {
+    console.log('Lỗi khi navigate tab:', e);
+    return false;
+  }
+}
+
 // Lấy dữ liệu chấm công từ FastWork
 async function fetchTimekeepingFromFastwork() {
   try {
-    const tabs = await chrome.tabs.query({ url: 'https://app.fastwork.vn/*' });
+    // 1. Thử lấy từ tab FastWork đang mở (không phải cửa sổ ẩn)
+    const allTabs = await chrome.tabs.query({ url: 'https://app.fastwork.vn/*' });
+    const visibleTabs = allTabs.filter(t => !hiddenFetchWindowId || t.windowId !== hiddenFetchWindowId);
 
-    if (tabs.length > 0) {
-      const response = await chrome.tabs.sendMessage(tabs[0].id, {
-        action: 'getTimekeepingData'
-      });
+    if (visibleTabs.length > 0) {
+      const tab = visibleTabs[0];
 
-      if (response && response.found) {
-        timekeepingData = {
-          ...response,
-          lastUpdated: new Date().toISOString()
-        };
-        await chrome.storage.local.set({ timekeepingData });
-        console.log('Đã cập nhật dữ liệu chấm công:', timekeepingData);
+      // Kiểm tra tab có đang active (user đang nhìn) không
+      const isActiveTab = tab.active;
+
+      if (isActiveTab) {
+        // Tab đang active → không reload để tránh gây phiền
+        // Dùng cửa sổ ẩn thay thế
+        console.log('Tab FastWork đang active, dùng cửa sổ ẩn để tránh reload gây phiền');
+
+        if (hiddenFetchWindowId) {
+          // Đã có cửa sổ ẩn → navigate về đúng URL chấm công
+          try {
+            const hiddenTabs = await chrome.tabs.query({ windowId: hiddenFetchWindowId });
+            if (hiddenTabs.length > 0) {
+              const loaded = await ensureTimekeepingUrl(hiddenTabs[0].id);
+              if (loaded) {
+                const response = await getDataFromTab(hiddenTabs[0].id);
+                if (response) {
+                  await handleTimekeepingResponse(response);
+                  return;
+                }
+              }
+            }
+          } catch (e) {
+            hiddenFetchWindowId = null;
+          }
+        }
+        // Tạo cửa sổ ẩn mới
+        await createHiddenFetchWindow();
+        return;
       }
+
+      // Tab không active (đang ở background) → navigate về đúng URL chấm công
+      console.log('Navigate tab FastWork (background tab) về trang chấm công:', tab.id);
+      const loaded = await ensureTimekeepingUrl(tab.id);
+
+      if (loaded) {
+        const response = await getDataFromTab(tab.id);
+        if (response) {
+          await handleTimekeepingResponse(response);
+          return;
+        }
+      }
+      console.log('Tab FastWork không trả về dữ liệu sau reload');
     }
+
+    // 2. Thử lấy từ cửa sổ ẩn nếu đang mở
+    if (hiddenFetchWindowId) {
+      try {
+        const hiddenTabs = await chrome.tabs.query({ windowId: hiddenFetchWindowId });
+        for (const tab of hiddenTabs) {
+          const loaded = await ensureTimekeepingUrl(tab.id);
+          if (loaded) {
+            const response = await getDataFromTab(tab.id);
+            if (response) {
+              await handleTimekeepingResponse(response);
+              return;
+            }
+          }
+        }
+      } catch (e) {
+        hiddenFetchWindowId = null;
+      }
+      return;
+    }
+
+    // 3. Không có tab nào → tạo cửa sổ ẩn (minimized) để fetch
+    await createHiddenFetchWindow();
+
   } catch (error) {
     console.log('Lỗi khi lấy dữ liệu:', error);
+  }
+}
+
+// Xử lý khi nhận được dữ liệu chấm công
+async function handleTimekeepingResponse(response) {
+  timekeepingData = {
+    ...response,
+    lastUpdated: new Date().toISOString()
+  };
+  await chrome.storage.local.set({ timekeepingData });
+  console.log('Đã cập nhật dữ liệu chấm công:', timekeepingData);
+
+  // Đóng cửa sổ ẩn nếu đã nhận dữ liệu
+  closeHiddenFetchWindow();
+
+  // Cập nhật tần suất polling
+  await updatePollingFrequency();
+}
+
+// Tạo cửa sổ ẩn (minimized) để load FastWork ngầm
+async function createHiddenFetchWindow() {
+  try {
+    console.log('Tạo cửa sổ ẩn để fetch dữ liệu FastWork...');
+    const win = await chrome.windows.create({
+      url: FASTWORK_URL,
+      type: 'popup',
+      state: 'minimized',
+      focused: false,
+      width: 800,
+      height: 600
+    });
+    hiddenFetchWindowId = win.id;
+    console.log('Đã tạo cửa sổ ẩn:', win.id);
+
+    // Tự động đóng sau 60 giây để tránh zombie window
+    setTimeout(() => {
+      closeHiddenFetchWindow();
+    }, 60000);
+  } catch (e) {
+    console.log('Không thể tạo cửa sổ ẩn:', e);
+    hiddenFetchWindowId = null;
+  }
+}
+
+// Đóng cửa sổ ẩn
+function closeHiddenFetchWindow() {
+  if (hiddenFetchWindowId) {
+    console.log('Đóng cửa sổ ẩn:', hiddenFetchWindowId);
+    chrome.windows.remove(hiddenFetchWindowId).catch(() => {});
+    hiddenFetchWindowId = null;
+  }
+}
+
+// Cập nhật tần suất polling dựa trên trạng thái chấm công
+async function updatePollingFrequency() {
+  const now = new Date();
+  const hour = now.getHours();
+  const day = now.getDay(); // 0=CN, 6=T7
+
+  // Giảm tần suất cuối tuần
+  if (day === 0 || day === 6) {
+    await chrome.alarms.clear('check-fastwork');
+    chrome.alarms.create('check-fastwork', {
+      delayInMinutes: 60,
+      periodInMinutes: 60
+    });
+    console.log('Polling cuối tuần: mỗi 60 phút');
+    return;
+  }
+
+  const result = await chrome.storage.local.get(['timekeepingData']);
+  const data = result.timekeepingData;
+  const today = getTodayString();
+
+  let needFrequentPoll = false;
+
+  if (hour >= 11 && hour < 14) {
+    // Gần giờ trưa - kiểm tra checkout buổi sáng
+    needFrequentPoll = !data || data.date !== today || !data.session1?.checkOut;
+  } else if (hour >= 16) {
+    // Gần giờ về - kiểm tra checkout buổi chiều
+    needFrequentPoll = !data || data.date !== today || !data.session2?.checkOut;
+  }
+
+  await chrome.alarms.clear('check-fastwork');
+
+  if (needFrequentPoll) {
+    chrome.alarms.create('check-fastwork', {
+      delayInMinutes: 0.5,
+      periodInMinutes: 0.5  // 30 giây
+    });
+    console.log('Polling nhanh: mỗi 30 giây (chưa chấm công)');
+  } else {
+    chrome.alarms.create('check-fastwork', {
+      delayInMinutes: 30,
+      periodInMinutes: 30
+    });
+    console.log('Polling bình thường: mỗi 30 phút');
   }
 }
 
@@ -409,11 +635,8 @@ async function initializeAlarms() {
     createDailyAlarm('evening-reminder', settings.evening.hour, settings.evening.minute);
   }
 
-  // Kiểm tra FastWork mỗi 30 phút
-  chrome.alarms.create('check-fastwork', {
-    delayInMinutes: 1,
-    periodInMinutes: 30
-  });
+  // Polling thông minh: 30s khi chưa chấm công, 30p khi đã chấm
+  await updatePollingFrequency();
 
   // Tạo alarm kiểm tra đồng bộ lúc 13:00
   createDailyAlarm('check-sync', 13, 0);
@@ -504,6 +727,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     };
     chrome.storage.local.set({ timekeepingData });
 
+    // Đóng cửa sổ ẩn nếu đã nhận được dữ liệu
+    if (request.data.found) {
+      closeHiddenFetchWindow();
+    }
+
     // Kiểm tra và dừng thông báo nếu đã chấm công
     if (timekeepingData.session1.checkOut && pendingNotifications.noon) {
       dismissReminder('noon');
@@ -511,6 +739,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (timekeepingData.session2.checkOut && pendingNotifications.evening) {
       dismissReminder('evening');
     }
+
+    // Cập nhật tần suất polling
+    updatePollingFrequency();
 
     sendResponse({ success: true });
     return true;

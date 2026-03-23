@@ -74,8 +74,41 @@ function extractTimekeepingData() {
     return result;
 }
 
+// Kiểm tra extension context còn hợp lệ không
+function isExtensionValid() {
+    try {
+        return !!chrome.runtime && !!chrome.runtime.id;
+    } catch (e) {
+        return false;
+    }
+}
+
+// Gửi message an toàn, tự dọn dẹp nếu extension đã bị invalidate
+function safeSendMessage(message) {
+    if (!isExtensionValid()) {
+        console.log('Extension context đã mất, dừng content script');
+        cleanup();
+        return;
+    }
+    try {
+        chrome.runtime.sendMessage(message);
+    } catch (e) {
+        console.log('Extension context invalidated, dừng content script');
+        cleanup();
+    }
+}
+
+// Dọn dẹp: ngắt observer và interval khi extension bị reload
+function cleanup() {
+    if (observer) {
+        observer.disconnect();
+    }
+    clearTimeout(window.timekeepingDebounce);
+}
+
 // Lắng nghe message từ background script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (!isExtensionValid()) return;
     if (request.action === 'getTimekeepingData') {
         // Đợi một chút để đảm bảo trang đã load xong
         setTimeout(() => {
@@ -90,7 +123,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 window.addEventListener('load', () => {
     setTimeout(() => {
         const data = extractTimekeepingData();
-        chrome.runtime.sendMessage({
+        safeSendMessage({
             action: 'timekeepingDataUpdated',
             data: data
         });
@@ -104,7 +137,7 @@ const observer = new MutationObserver((mutations) => {
     window.timekeepingDebounce = setTimeout(() => {
         const data = extractTimekeepingData();
         if (data.found) {
-            chrome.runtime.sendMessage({
+            safeSendMessage({
                 action: 'timekeepingDataUpdated',
                 data: data
             });
