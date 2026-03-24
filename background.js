@@ -41,14 +41,14 @@ const FASTWORK_URL = 'https://app.fastwork.vn/timekeepingpersonal#!/';
 
 // Khởi tạo khi extension được cài đặt
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('Extension đã được cài đặt');
-  initializeAlarms();
+  console.log('=== Extension đã được cài đặt/cập nhật ===');
+  initializeAlarms().catch(e => console.error('Lỗi initializeAlarms (onInstalled):', e));
 });
 
 // Khởi tạo khi Chrome khởi động
 chrome.runtime.onStartup.addListener(() => {
-  console.log('Chrome đã khởi động');
-  initializeAlarms();
+  console.log('=== Chrome đã khởi động ===');
+  initializeAlarms().catch(e => console.error('Lỗi initializeAlarms (onStartup):', e));
 });
 
 // Xử lý khi alarm được kích hoạt
@@ -56,12 +56,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log('Alarm triggered:', alarm.name);
 
   if (alarm.name === 'morningIn-reminder') {
+    console.log('[alarm] Kích hoạt morningIn-reminder');
     await handleMorningInReminder();
   } else if (alarm.name === 'noon-reminder') {
+    console.log('[alarm] Kích hoạt noon-reminder');
     await handleNoonReminder();
   } else if (alarm.name === 'afternoonIn-reminder') {
+    console.log('[alarm] Kích hoạt afternoonIn-reminder');
     await handleAfternoonInReminder();
   } else if (alarm.name === 'evening-reminder') {
+    console.log('[alarm] Kích hoạt evening-reminder');
     await handleEveningReminder();
   } else if (alarm.name === 'repeat-morningIn' && pendingNotifications.morningIn) {
     showReminderPopup('morningIn');
@@ -85,8 +89,37 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await recheckAfterDismiss('afternoonIn');
   } else if (alarm.name === 'recheck-evening') {
     await recheckAfterDismiss('evening');
+  } else if (alarm.name === 'recheck-sync') {
+    await checkSyncStatus();
+  } else if (alarm.name === 'watchdog') {
+    await handleWatchdog();
   }
 });
+
+// Khởi chạy ngay khi service worker load (không phụ thuộc onInstalled/onStartup)
+// Service worker có thể restart bất cứ lúc nào mà không trigger onInstalled/onStartup
+(async () => {
+  console.log('=== Service worker loaded ===');
+  try {
+    // Kiểm tra xem alarms đã có chưa
+    const existingAlarms = await chrome.alarms.getAll();
+    console.log(`[startup] Có ${existingAlarms.length} alarms:`, existingAlarms.map(a => a.name));
+
+    // Nếu không có watchdog alarm → cần khởi tạo lại
+    const hasWatchdog = existingAlarms.some(a => a.name === 'watchdog');
+    if (!hasWatchdog) {
+      console.log('[startup] Không có watchdog → khởi tạo alarms');
+      await initializeAlarms();
+    } else {
+      // Watchdog đã có → chỉ cần chạy kiểm tra ngay
+      console.log('[startup] Watchdog đang chạy → kiểm tra ngay');
+      const settings = await getSettings();
+      await checkImmediateReminders(settings);
+    }
+  } catch (e) {
+    console.error('[startup] Lỗi:', e);
+  }
+})();
 
 // Kiểm tra trạng thái đồng bộ lúc 13:00
 async function checkSyncStatus() {
@@ -284,28 +317,36 @@ async function handleEveningReminder() {
 
 // Hiển thị popup window nhắc nhở
 async function showReminderPopup(type) {
+  console.log(`[popup] Tạo popup cho: ${type}`);
+
   // Đóng popup cũ nếu có
   if (reminderWindowId) {
     try {
       await chrome.windows.remove(reminderWindowId);
+      console.log(`[popup] Đã đóng popup cũ: ${reminderWindowId}`);
     } catch (e) {
       // Window đã bị đóng
     }
+    reminderWindowId = null;
   }
 
-  // Tạo popup window nhỏ gọn ở góc phải trên
-  const popup = await chrome.windows.create({
-    url: `reminder.html?type=${type}`,
-    type: 'popup',
-    width: 340,
-    height: 220,
-    top: 20,
-    left: 1560,  // Góc phải (điều chỉnh theo màn hình của bạn)
-    focused: true
-  });
+  try {
+    // Tạo popup window nhỏ gọn ở góc phải trên
+    const popup = await chrome.windows.create({
+      url: `reminder.html?type=${type}`,
+      type: 'popup',
+      width: 340,
+      height: 220,
+      top: 20,
+      left: 1560,  // Góc phải (điều chỉnh theo màn hình của bạn)
+      focused: true
+    });
 
-  reminderWindowId = popup.id;
-  console.log('Reminder popup created:', popup.id);
+    reminderWindowId = popup.id;
+    console.log(`[popup] Popup ${type} đã tạo xong, windowId=${popup.id}`);
+  } catch (e) {
+    console.error(`[popup] KHÔNG TẠO ĐƯỢC POPUP ${type}:`, e);
+  }
 
   // Cũng gửi notification hệ thống (backup)
   showSystemNotification(type);
@@ -736,52 +777,105 @@ async function initializeAlarms() {
   // Tạo alarm kiểm tra đồng bộ lúc 13:00
   createDailyAlarm('check-sync', 13, 0);
 
+  // Watchdog: kiểm tra nhắc nhở mỗi 1 phút (backup cho trường hợp alarm chính bị miss)
+  // Chrome MV3 minimum period = 1 phút
+  chrome.alarms.create('watchdog', {
+    delayInMinutes: 0.5,
+    periodInMinutes: 1
+  });
+
   console.log('Alarms đã được khởi tạo');
 
   // Kiểm tra ngay: nếu đang trong khung giờ nhắc mà chưa chấm công → nhắc luôn
-  await checkImmediateReminders(settings);
+  try {
+    await checkImmediateReminders(settings);
+  } catch (e) {
+    console.error('Lỗi checkImmediateReminders trong initializeAlarms:', e);
+  }
 }
 
 // Kiểm tra và nhắc ngay nếu đang trong khung giờ mà chưa chấm công
 async function checkImmediateReminders(settings) {
-  await fetchTimekeepingFromFastwork();
-
-  // Đọc từ storage để có data mới nhất
-  const result = await chrome.storage.local.get(['timekeepingData']);
-  const data = result.timekeepingData || timekeepingData;
+  const now = new Date();
   const today = getTodayString();
+  console.log(`[checkImmediate] ====== Bắt đầu kiểm tra lúc ${now.toLocaleTimeString()} (${today}) ======`);
 
+  // Kiểm tra ngày trong tuần (không nhắc T7, CN)
+  const day = now.getDay();
+  if (day === 0 || day === 6) {
+    console.log('[checkImmediate] Cuối tuần, bỏ qua');
+    return;
+  }
+
+  // Đọc từ storage (nhanh, không cần fetch)
+  const result = await chrome.storage.local.get(['timekeepingData']);
+  const data = result.timekeepingData;
+
+  console.log('[checkImmediate] Data từ storage:', JSON.stringify(data));
+  console.log('[checkImmediate] pendingNotifications:', JSON.stringify(pendingNotifications));
+
+  // Danh sách kiểm tra với field mapping
   const checks = [
-    {
-      type: 'morningIn',
-      setting: settings.morningIn,
-      needReminder: !data || data.date !== today || !data.session1?.checkIn
-    },
-    {
-      type: 'noon',
-      setting: settings.noon,
-      needReminder: !data || data.date !== today || !data.session1?.checkOut
-    },
-    {
-      type: 'afternoonIn',
-      setting: settings.afternoonIn,
-      needReminder: !data || data.date !== today || !data.session2?.checkIn
-    },
-    {
-      type: 'evening',
-      setting: settings.evening,
-      needReminder: !data || data.date !== today || !data.session2?.checkOut
-    }
+    { type: 'morningIn', setting: settings?.morningIn, field: 'session1', subField: 'checkIn' },
+    { type: 'noon', setting: settings?.noon, field: 'session1', subField: 'checkOut' },
+    { type: 'afternoonIn', setting: settings?.afternoonIn, field: 'session2', subField: 'checkIn' },
+    { type: 'evening', setting: settings?.evening, field: 'session2', subField: 'checkOut' }
   ];
 
   for (const check of checks) {
-    if (check.setting && check.setting.enabled && isTimeValidForReminder(check.type) && check.needReminder) {
-      console.log(`Đang trong khung giờ ${check.type} và chưa chấm công → nhắc ngay!`);
-      pendingNotifications[check.type] = true;
-      showReminderPopup(check.type);
-      startRepeatAlarm(check.type);
-      return; // Chỉ nhắc 1 loại tại 1 thời điểm
+    const enabled = check.setting?.enabled;
+    const inTimeWindow = isTimeValidForReminder(check.type);
+    const pending = pendingNotifications[check.type];
+    const hasData = data && data.date === today && data.found;
+    const alreadyDone = hasData && data[check.field]?.[check.subField];
+
+    console.log(`[checkImmediate] ${check.type}: enabled=${enabled}, inTimeWindow=${inTimeWindow}, pending=${pending}, hasData=${hasData}, alreadyDone=${alreadyDone}`);
+
+    if (!enabled) continue;
+    if (!inTimeWindow) continue;
+    if (pending) continue;  // Đang nhắc rồi
+    if (alreadyDone) continue;  // Đã chấm công rồi
+
+    // CẦN NHẮC → hiển thị ngay, KHÔNG đợi fetch
+    console.log(`[checkImmediate] >>> NHẮC NGAY: ${check.type} <<<`);
+    pendingNotifications[check.type] = true;
+
+    try {
+      await showReminderPopup(check.type);
+      console.log(`[checkImmediate] Popup ${check.type} đã hiển thị thành công`);
+    } catch (e) {
+      console.error(`[checkImmediate] Lỗi hiển thị popup ${check.type}:`, e);
+      // Fallback: notification hệ thống
+      try {
+        showSystemNotification(check.type);
+        console.log(`[checkImmediate] Fallback notification ${check.type} đã gửi`);
+      } catch (e2) {
+        console.error(`[checkImmediate] Cả fallback cũng lỗi:`, e2);
+      }
     }
+    startRepeatAlarm(check.type);
+
+    // Fetch dữ liệu mới nhất ở background (không block)
+    fetchTimekeepingFromFastwork().catch(e => console.log('[checkImmediate] Fetch background lỗi:', e));
+
+    return; // Chỉ nhắc 1 loại tại 1 thời điểm (watchdog sẽ xử lý loại tiếp theo)
+  }
+
+  console.log('[checkImmediate] Không có loại nào cần nhắc lúc này');
+}
+
+// Watchdog: chạy định kỳ, kiểm tra có nhắc nhở nào bị bỏ sót
+async function handleWatchdog() {
+  const now = new Date();
+  console.log(`[watchdog] ====== Watchdog chạy lúc ${now.toLocaleTimeString()} ======`);
+
+  try {
+    await resetForNewDay();
+    const settings = await getSettings();
+    console.log('[watchdog] Settings:', JSON.stringify(settings));
+    await checkImmediateReminders(settings);
+  } catch (e) {
+    console.error('[watchdog] Lỗi:', e);
   }
 }
 
@@ -793,6 +887,17 @@ function createDailyAlarm(name, hour, minute) {
   alarmTime.setHours(hour, minute, 0, 0);
 
   if (alarmTime <= now) {
+    // Giờ đã qua → kiểm tra nếu vẫn trong khung giờ hợp lệ thì kích hoạt ngay (1 phút)
+    const type = name.replace('-reminder', '');
+    if (isTimeValidForReminder(type)) {
+      chrome.alarms.create(name, {
+        delayInMinutes: 0.1,  // Kích hoạt gần như ngay lập tức
+        periodInMinutes: 24 * 60
+      });
+      console.log(`Alarm "${name}" - giờ đã qua nhưng còn trong khung → kích hoạt ngay`);
+      return;
+    }
+    // Ngoài khung giờ → đặt cho ngày mai
     alarmTime.setDate(alarmTime.getDate() + 1);
   }
 
@@ -839,8 +944,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'saveSettings') {
-    saveSettings(request.settings).then(() => {
-      initializeAlarms();
+    saveSettings(request.settings).then(async () => {
+      await initializeAlarms();
+      // Kiểm tra ngay sau khi lưu - không chờ watchdog
+      const settings = await getSettings();
+      await checkImmediateReminders(settings);
       sendResponse({ success: true });
     });
     return true;
