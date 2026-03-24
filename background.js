@@ -36,6 +36,11 @@ const REPEAT_INTERVAL_MINUTES = 1;
 // Thời gian kiểm tra lại sau khi dismiss (phút)
 const RECHECK_AFTER_DISMISS_MINUTES = 1;
 
+// Kiểm tra giá trị chấm công có hợp lệ không (không phải null/undefined/""/"_____")
+function isValidTimekeeping(val) {
+  return val && typeof val === 'string' && val.trim() !== '' && !/^_+$/.test(val.trim());
+}
+
 // URL trang chấm công FastWork
 const FASTWORK_URL = 'https://app.fastwork.vn/timekeepingpersonal#!/';
 
@@ -261,7 +266,7 @@ async function handleMorningInReminder() {
   await fetchTimekeepingFromFastwork();
 
   // Kiểm tra đã checkin buổi sáng chưa
-  if (!timekeepingData.session1.checkIn) {
+  if (!isValidTimekeeping(timekeepingData.session1.checkIn)) {
     pendingNotifications.morningIn = true;
     showReminderPopup('morningIn');
     startRepeatAlarm('morningIn');
@@ -276,7 +281,7 @@ async function handleNoonReminder() {
   await fetchTimekeepingFromFastwork();
 
   // Kiểm tra đã chấm công ra buổi sáng chưa
-  if (!timekeepingData.session1.checkOut) {
+  if (!isValidTimekeeping(timekeepingData.session1.checkOut)) {
     pendingNotifications.noon = true;
     showReminderPopup('noon');
     startRepeatAlarm('noon');
@@ -291,7 +296,7 @@ async function handleAfternoonInReminder() {
   await fetchTimekeepingFromFastwork();
 
   // Kiểm tra đã checkin buổi chiều chưa
-  if (!timekeepingData.session2.checkIn) {
+  if (!isValidTimekeeping(timekeepingData.session2.checkIn)) {
     pendingNotifications.afternoonIn = true;
     showReminderPopup('afternoonIn');
     startRepeatAlarm('afternoonIn');
@@ -306,7 +311,7 @@ async function handleEveningReminder() {
   await fetchTimekeepingFromFastwork();
 
   // Kiểm tra đã chấm công ra buổi chiều chưa
-  if (!timekeepingData.session2.checkOut) {
+  if (!isValidTimekeeping(timekeepingData.session2.checkOut)) {
     pendingNotifications.evening = true;
     showReminderPopup('evening');
     startRepeatAlarm('evening');
@@ -469,13 +474,13 @@ async function recheckAfterDismiss(type) {
     // Chỉ dùng dữ liệu nếu đúng ngày hôm nay
     if (data.date === today) {
       if (type === 'morningIn') {
-        needReminder = !data.session1?.checkIn;
+        needReminder = !isValidTimekeeping(data.session1?.checkIn);
       } else if (type === 'noon') {
-        needReminder = !data.session1?.checkOut;
+        needReminder = !isValidTimekeeping(data.session1?.checkOut);
       } else if (type === 'afternoonIn') {
-        needReminder = !data.session2?.checkIn;
+        needReminder = !isValidTimekeeping(data.session2?.checkIn);
       } else if (type === 'evening') {
-        needReminder = !data.session2?.checkOut;
+        needReminder = !isValidTimekeeping(data.session2?.checkOut);
       }
     } else {
       // Dữ liệu cũ ngày khác, không tin cậy → nhắc nếu còn trong khung giờ
@@ -777,11 +782,11 @@ async function initializeAlarms() {
   // Tạo alarm kiểm tra đồng bộ lúc 13:00
   createDailyAlarm('check-sync', 13, 0);
 
-  // Watchdog: kiểm tra nhắc nhở mỗi 1 phút (backup cho trường hợp alarm chính bị miss)
+  // Watchdog: kiểm tra nhắc nhở mỗi 3 phút (backup cho trường hợp alarm chính bị miss)
   // Chrome MV3 minimum period = 1 phút
   chrome.alarms.create('watchdog', {
-    delayInMinutes: 0.5,
-    periodInMinutes: 1
+    delayInMinutes: 3,
+    periodInMinutes: 3
   });
 
   console.log('Alarms đã được khởi tạo');
@@ -827,7 +832,9 @@ async function checkImmediateReminders(settings) {
     const inTimeWindow = isTimeValidForReminder(check.type);
     const pending = pendingNotifications[check.type];
     const hasData = data && data.date === today && data.found;
-    const alreadyDone = hasData && data[check.field]?.[check.subField];
+    const rawValue = hasData ? data[check.field]?.[check.subField] : null;
+    // "_____" từ FastWork nghĩa là chưa chấm công
+    const alreadyDone = rawValue && !/^_+$/.test(rawValue);
 
     console.log(`[checkImmediate] ${check.type}: enabled=${enabled}, inTimeWindow=${inTimeWindow}, pending=${pending}, hasData=${hasData}, alreadyDone=${alreadyDone}`);
 
@@ -982,16 +989,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     // Kiểm tra và dừng thông báo nếu đã chấm công
-    if (timekeepingData.session1.checkIn && pendingNotifications.morningIn) {
+    if (isValidTimekeeping(timekeepingData.session1.checkIn) && pendingNotifications.morningIn) {
       dismissReminder('morningIn');
     }
-    if (timekeepingData.session1.checkOut && pendingNotifications.noon) {
+    if (isValidTimekeeping(timekeepingData.session1.checkOut) && pendingNotifications.noon) {
       dismissReminder('noon');
     }
-    if (timekeepingData.session2.checkIn && pendingNotifications.afternoonIn) {
+    if (isValidTimekeeping(timekeepingData.session2.checkIn) && pendingNotifications.afternoonIn) {
       dismissReminder('afternoonIn');
     }
-    if (timekeepingData.session2.checkOut && pendingNotifications.evening) {
+    if (isValidTimekeeping(timekeepingData.session2.checkOut) && pendingNotifications.evening) {
       dismissReminder('evening');
     }
 

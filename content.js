@@ -16,9 +16,11 @@ function parseTimekeeping(text) {
     }
 
     const parts = text.split('-').map(p => p.trim());
+    // Kiểm tra giá trị hợp lệ (không phải rỗng, không phải chỉ có dấu gạch dưới)
+    const isValid = (val) => val && val !== '' && !/^_+$/.test(val);
     return {
-        checkIn: parts[0] && parts[0] !== '___' && parts[0] !== '' ? parts[0] : null,
-        checkOut: parts[1] && parts[1] !== '___' && parts[1] !== '' ? parts[1] : null
+        checkIn: isValid(parts[0]) ? parts[0] : null,
+        checkOut: isValid(parts[1]) ? parts[1] : null
     };
 }
 
