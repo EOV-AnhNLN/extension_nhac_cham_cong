@@ -2,7 +2,9 @@ const params = new URLSearchParams(window.location.search);
 const type = params.get('type') || 'noon';
 
 const messages = {
+    morningIn: { icon: '🌅', message: 'Đã 8:00 - Checkin buổi sáng đi!' },
     noon: { icon: '🌞', message: 'Đã 12:00 - Chấm công ra ăn trưa!' },
+    afternoonIn: { icon: '☀️', message: 'Đã 13:30 - Checkin buổi chiều đi!' },
     evening: { icon: '🌙', message: 'Đã 17:00 - Chấm công ra về!' },
     sync: { icon: '🔄', message: 'Chưa đồng bộ dữ liệu hôm nay! Mở FastWork để cập nhật.' }
 };

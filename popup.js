@@ -1,10 +1,16 @@
 // DOM Elements
+const morningInEnabled = document.getElementById('morningIn-enabled');
+const morningInTime = document.getElementById('morningIn-time');
 const noonEnabled = document.getElementById('noon-enabled');
 const noonTime = document.getElementById('noon-time');
+const afternoonInEnabled = document.getElementById('afternoonIn-enabled');
+const afternoonInTime = document.getElementById('afternoonIn-time');
 const eveningEnabled = document.getElementById('evening-enabled');
 const eveningTime = document.getElementById('evening-time');
 const saveBtn = document.getElementById('save-btn');
+const testMorningInBtn = document.getElementById('test-morningIn');
 const testNoonBtn = document.getElementById('test-noon');
+const testAfternoonInBtn = document.getElementById('test-afternoonIn');
 const testEveningBtn = document.getElementById('test-evening');
 const statusEl = document.getElementById('status');
 const timekeepingStatusEl = document.getElementById('timekeeping-status');
@@ -19,7 +25,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Lắng nghe sự kiện
 saveBtn.addEventListener('click', saveSettings);
+testMorningInBtn.addEventListener('click', () => testNotification('morningIn'));
 testNoonBtn.addEventListener('click', () => testNotification('noon'));
+testAfternoonInBtn.addEventListener('click', () => testNotification('afternoonIn'));
 testEveningBtn.addEventListener('click', () => testNotification('evening'));
 refreshBtn.addEventListener('click', refreshTimekeeping);
 openFastworkBtn.addEventListener('click', openFastwork);
@@ -29,8 +37,16 @@ function loadSettings() {
     chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
         if (response && response.settings) {
             const settings = response.settings;
+            if (settings.morningIn) {
+                morningInEnabled.checked = settings.morningIn.enabled;
+                morningInTime.value = formatTime(settings.morningIn.hour, settings.morningIn.minute);
+            }
             noonEnabled.checked = settings.noon.enabled;
             noonTime.value = formatTime(settings.noon.hour, settings.noon.minute);
+            if (settings.afternoonIn) {
+                afternoonInEnabled.checked = settings.afternoonIn.enabled;
+                afternoonInTime.value = formatTime(settings.afternoonIn.hour, settings.afternoonIn.minute);
+            }
             eveningEnabled.checked = settings.evening.enabled;
             eveningTime.value = formatTime(settings.evening.hour, settings.evening.minute);
         }
@@ -110,14 +126,26 @@ function openFastwork() {
 
 // Lưu cài đặt
 function saveSettings() {
+    const morningInTimeParts = morningInTime.value.split(':');
     const noonTimeParts = noonTime.value.split(':');
+    const afternoonInTimeParts = afternoonInTime.value.split(':');
     const eveningTimeParts = eveningTime.value.split(':');
 
     const settings = {
+        morningIn: {
+            hour: parseInt(morningInTimeParts[0]),
+            minute: parseInt(morningInTimeParts[1]),
+            enabled: morningInEnabled.checked
+        },
         noon: {
             hour: parseInt(noonTimeParts[0]),
             minute: parseInt(noonTimeParts[1]),
             enabled: noonEnabled.checked
+        },
+        afternoonIn: {
+            hour: parseInt(afternoonInTimeParts[0]),
+            minute: parseInt(afternoonInTimeParts[1]),
+            enabled: afternoonInEnabled.checked
         },
         evening: {
             hour: parseInt(eveningTimeParts[0]),

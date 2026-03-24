@@ -27,11 +27,27 @@
                 <button class="fastwork-btn" id="open-fastwork">🌐 Mở FastWork</button>
             </div>
 
+            <!-- Nhắc nhở checkin sáng -->
+            <div class="reminder-card">
+                <div class="reminder-header">
+                    <span class="reminder-icon">🌅</span>
+                    <span class="reminder-title">Checkin Sáng</span>
+                    <label class="switch">
+                        <input type="checkbox" id="morningIn-enabled" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="reminder-time">
+                    <input type="time" id="morningIn-time" value="08:00">
+                </div>
+                <button class="test-btn" id="test-morningIn">🔔 Test Thông Báo</button>
+            </div>
+
             <!-- Nhắc nhở buổi trưa -->
             <div class="reminder-card">
                 <div class="reminder-header">
                     <span class="reminder-icon">🌞</span>
-                    <span class="reminder-title">Buổi Trưa (Ra ăn trưa)</span>
+                    <span class="reminder-title">Checkout Trưa</span>
                     <label class="switch">
                         <input type="checkbox" id="noon-enabled" checked>
                         <span class="slider"></span>
@@ -43,11 +59,27 @@
                 <button class="test-btn" id="test-noon">🔔 Test Thông Báo</button>
             </div>
 
+            <!-- Nhắc nhở checkin chiều -->
+            <div class="reminder-card">
+                <div class="reminder-header">
+                    <span class="reminder-icon">☀️</span>
+                    <span class="reminder-title">Checkin Chiều</span>
+                    <label class="switch">
+                        <input type="checkbox" id="afternoonIn-enabled" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="reminder-time">
+                    <input type="time" id="afternoonIn-time" value="13:30">
+                </div>
+                <button class="test-btn" id="test-afternoonIn">🔔 Test Thông Báo</button>
+            </div>
+
             <!-- Nhắc nhở buổi chiều -->
             <div class="reminder-card">
                 <div class="reminder-header">
                     <span class="reminder-icon">🌙</span>
-                    <span class="reminder-title">Buổi Chiều (Ra về)</span>
+                    <span class="reminder-title">Checkout Chiều</span>
                     <label class="switch">
                         <input type="checkbox" id="evening-enabled" checked>
                         <span class="slider"></span>

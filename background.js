@@ -1,12 +1,16 @@
 // Thời gian nhắc nhở mặc định (giờ:phút)
 const DEFAULT_REMINDERS = {
+  morningIn: { hour: 8, minute: 0, enabled: true },
   noon: { hour: 12, minute: 0, enabled: true },
+  afternoonIn: { hour: 13, minute: 30, enabled: true },
   evening: { hour: 17, minute: 0, enabled: true }
 };
 
 // Lưu trữ các thông báo đang chờ xác nhận
 let pendingNotifications = {
+  morningIn: false,
   noon: false,
+  afternoonIn: false,
   evening: false,
   sync: false
 };
@@ -51,12 +55,20 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log('Alarm triggered:', alarm.name);
 
-  if (alarm.name === 'noon-reminder') {
+  if (alarm.name === 'morningIn-reminder') {
+    await handleMorningInReminder();
+  } else if (alarm.name === 'noon-reminder') {
     await handleNoonReminder();
+  } else if (alarm.name === 'afternoonIn-reminder') {
+    await handleAfternoonInReminder();
   } else if (alarm.name === 'evening-reminder') {
     await handleEveningReminder();
+  } else if (alarm.name === 'repeat-morningIn' && pendingNotifications.morningIn) {
+    showReminderPopup('morningIn');
   } else if (alarm.name === 'repeat-noon' && pendingNotifications.noon) {
     showReminderPopup('noon');
+  } else if (alarm.name === 'repeat-afternoonIn' && pendingNotifications.afternoonIn) {
+    showReminderPopup('afternoonIn');
   } else if (alarm.name === 'repeat-evening' && pendingNotifications.evening) {
     showReminderPopup('evening');
   } else if (alarm.name === 'check-fastwork') {
@@ -65,8 +77,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await checkSyncStatus();
   } else if (alarm.name === 'repeat-sync' && pendingNotifications.sync) {
     showSyncReminderPopup();
+  } else if (alarm.name === 'recheck-morningIn') {
+    await recheckAfterDismiss('morningIn');
   } else if (alarm.name === 'recheck-noon') {
     await recheckAfterDismiss('noon');
+  } else if (alarm.name === 'recheck-afternoonIn') {
+    await recheckAfterDismiss('afternoonIn');
   } else if (alarm.name === 'recheck-evening') {
     await recheckAfterDismiss('evening');
   }
@@ -135,14 +151,20 @@ async function resetForNewDay() {
     console.log(`Đã qua ngày mới (${lastDate} -> ${today}), reset trạng thái`);
 
     // Reset pending notifications
+    pendingNotifications.morningIn = false;
     pendingNotifications.noon = false;
+    pendingNotifications.afternoonIn = false;
     pendingNotifications.evening = false;
     pendingNotifications.sync = false;
 
     // Xóa các alarm recheck và repeat cũ
+    await chrome.alarms.clear('recheck-morningIn');
     await chrome.alarms.clear('recheck-noon');
+    await chrome.alarms.clear('recheck-afternoonIn');
     await chrome.alarms.clear('recheck-evening');
+    await chrome.alarms.clear('repeat-morningIn');
     await chrome.alarms.clear('repeat-noon');
+    await chrome.alarms.clear('repeat-afternoonIn');
     await chrome.alarms.clear('repeat-evening');
     await chrome.alarms.clear('repeat-sync');
 
@@ -168,7 +190,9 @@ async function resetForNewDay() {
     closeHiddenFetchWindow();
 
     // Xóa notification hệ thống cũ
+    chrome.notifications.clear('morningIn-reminder');
     chrome.notifications.clear('noon-reminder');
+    chrome.notifications.clear('afternoonIn-reminder');
     chrome.notifications.clear('evening-reminder');
   }
 
@@ -180,18 +204,40 @@ async function resetForNewDay() {
 function isTimeValidForReminder(type) {
   const now = new Date();
   const hour = now.getHours();
+  const minute = now.getMinutes();
 
-  if (type === 'noon') {
-    // Chỉ nhắc buổi trưa từ 12:00 đến 13:30
+  if (type === 'morningIn') {
+    // Chỉ nhắc checkin sáng từ 7:30 đến 9:30
+    return (hour === 7 && minute >= 30) || (hour === 8) || (hour === 9 && minute <= 30);
+  } else if (type === 'noon') {
+    // Chỉ nhắc checkout trưa từ 12:00 đến 13:30
     return hour >= 12 && hour < 14;
+  } else if (type === 'afternoonIn') {
+    // Chỉ nhắc checkin chiều từ 12:00 đến 15:30
+    return (hour === 12 && minute >= 0) || (hour === 13) || (hour === 14) || (hour === 15 && minute <= 30);
   } else if (type === 'evening') {
-    // Chỉ nhắc buổi chiều từ 17:00 đến 23:59
+    // Chỉ nhắc checkout chiều từ 17:00 đến 23:59
     return hour >= 17;
   }
   return false;
 }
 
-// Xử lý nhắc nhở buổi trưa (12:00)
+// Xử lý nhắc nhở checkin sáng (8:00)
+async function handleMorningInReminder() {
+  await resetForNewDay();
+  await fetchTimekeepingFromFastwork();
+
+  // Kiểm tra đã checkin buổi sáng chưa
+  if (!timekeepingData.session1.checkIn) {
+    pendingNotifications.morningIn = true;
+    showReminderPopup('morningIn');
+    startRepeatAlarm('morningIn');
+  } else {
+    console.log('Đã checkin buổi sáng, không cần nhắc');
+  }
+}
+
+// Xử lý nhắc nhở checkout trưa (12:00)
 async function handleNoonReminder() {
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
@@ -206,7 +252,22 @@ async function handleNoonReminder() {
   }
 }
 
-// Xử lý nhắc nhở buổi chiều (17:00)
+// Xử lý nhắc nhở checkin chiều (13:30)
+async function handleAfternoonInReminder() {
+  await resetForNewDay();
+  await fetchTimekeepingFromFastwork();
+
+  // Kiểm tra đã checkin buổi chiều chưa
+  if (!timekeepingData.session2.checkIn) {
+    pendingNotifications.afternoonIn = true;
+    showReminderPopup('afternoonIn');
+    startRepeatAlarm('afternoonIn');
+  } else {
+    console.log('Đã checkin buổi chiều, không cần nhắc');
+  }
+}
+
+// Xử lý nhắc nhở checkout chiều (17:00)
 async function handleEveningReminder() {
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
@@ -253,9 +314,17 @@ async function showReminderPopup(type) {
 // Hiển thị notification hệ thống (backup)
 function showSystemNotification(type) {
   const messages = {
+    morningIn: {
+      title: '⏰ Nhắc Nhở Chấm Công',
+      message: 'Đã 8:00 - Đừng quên checkin buổi sáng!'
+    },
     noon: {
       title: '⏰ Nhắc Nhở Chấm Công',
       message: 'Đã 12:00 - Đừng quên chấm công ra ăn trưa!'
+    },
+    afternoonIn: {
+      title: '⏰ Nhắc Nhở Chấm Công',
+      message: 'Đã 13:30 - Đừng quên checkin buổi chiều!'
     },
     evening: {
       title: '⏰ Nhắc Nhở Chấm Công',
@@ -277,8 +346,12 @@ function showSystemNotification(type) {
 chrome.notifications.onClicked.addListener((notificationId) => {
   chrome.notifications.clear(notificationId);
 
-  if (notificationId.startsWith('noon')) {
+  if (notificationId.startsWith('morningIn')) {
+    dismissReminder('morningIn');
+  } else if (notificationId.startsWith('noon')) {
     dismissReminder('noon');
+  } else if (notificationId.startsWith('afternoonIn')) {
+    dismissReminder('afternoonIn');
   } else if (notificationId.startsWith('evening')) {
     dismissReminder('evening');
   }
@@ -289,8 +362,12 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 // Xử lý khi đóng notification
 chrome.notifications.onClosed.addListener((notificationId, byUser) => {
   if (byUser) {
-    if (notificationId.startsWith('noon')) {
+    if (notificationId.startsWith('morningIn')) {
+      dismissReminder('morningIn');
+    } else if (notificationId.startsWith('noon')) {
       dismissReminder('noon');
+    } else if (notificationId.startsWith('afternoonIn')) {
+      dismissReminder('afternoonIn');
     } else if (notificationId.startsWith('evening')) {
       dismissReminder('evening');
     }
@@ -350,8 +427,12 @@ async function recheckAfterDismiss(type) {
   if (data && data.found) {
     // Chỉ dùng dữ liệu nếu đúng ngày hôm nay
     if (data.date === today) {
-      if (type === 'noon') {
+      if (type === 'morningIn') {
+        needReminder = !data.session1?.checkIn;
+      } else if (type === 'noon') {
         needReminder = !data.session1?.checkOut;
+      } else if (type === 'afternoonIn') {
+        needReminder = !data.session2?.checkIn;
       } else if (type === 'evening') {
         needReminder = !data.session2?.checkOut;
       }
@@ -581,9 +662,15 @@ async function updatePollingFrequency() {
 
   let needFrequentPoll = false;
 
-  if (hour >= 11 && hour < 14) {
+  if (hour >= 7 && hour < 10) {
+    // Gần giờ sáng - kiểm tra checkin buổi sáng
+    needFrequentPoll = !data || data.date !== today || !data.session1?.checkIn;
+  } else if (hour >= 11 && hour < 14) {
     // Gần giờ trưa - kiểm tra checkout buổi sáng
     needFrequentPoll = !data || data.date !== today || !data.session1?.checkOut;
+  } else if (hour >= 13 && hour < 15) {
+    // Gần giờ chiều - kiểm tra checkin buổi chiều
+    needFrequentPoll = !data || data.date !== today || !data.session2?.checkIn;
   } else if (hour >= 16) {
     // Gần giờ về - kiểm tra checkout buổi chiều
     needFrequentPoll = !data || data.date !== today || !data.session2?.checkOut;
@@ -627,8 +714,16 @@ async function initializeAlarms() {
     await chrome.alarms.clear(alarm.name);
   }
 
+  if (settings.morningIn && settings.morningIn.enabled) {
+    createDailyAlarm('morningIn-reminder', settings.morningIn.hour, settings.morningIn.minute);
+  }
+
   if (settings.noon.enabled) {
     createDailyAlarm('noon-reminder', settings.noon.hour, settings.noon.minute);
+  }
+
+  if (settings.afternoonIn && settings.afternoonIn.enabled) {
+    createDailyAlarm('afternoonIn-reminder', settings.afternoonIn.hour, settings.afternoonIn.minute);
   }
 
   if (settings.evening.enabled) {
@@ -733,8 +828,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     // Kiểm tra và dừng thông báo nếu đã chấm công
+    if (timekeepingData.session1.checkIn && pendingNotifications.morningIn) {
+      dismissReminder('morningIn');
+    }
     if (timekeepingData.session1.checkOut && pendingNotifications.noon) {
       dismissReminder('noon');
+    }
+    if (timekeepingData.session2.checkIn && pendingNotifications.afternoonIn) {
+      dismissReminder('afternoonIn');
     }
     if (timekeepingData.session2.checkOut && pendingNotifications.evening) {
       dismissReminder('evening');
