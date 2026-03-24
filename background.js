@@ -737,6 +737,52 @@ async function initializeAlarms() {
   createDailyAlarm('check-sync', 13, 0);
 
   console.log('Alarms đã được khởi tạo');
+
+  // Kiểm tra ngay: nếu đang trong khung giờ nhắc mà chưa chấm công → nhắc luôn
+  await checkImmediateReminders(settings);
+}
+
+// Kiểm tra và nhắc ngay nếu đang trong khung giờ mà chưa chấm công
+async function checkImmediateReminders(settings) {
+  await fetchTimekeepingFromFastwork();
+
+  // Đọc từ storage để có data mới nhất
+  const result = await chrome.storage.local.get(['timekeepingData']);
+  const data = result.timekeepingData || timekeepingData;
+  const today = getTodayString();
+
+  const checks = [
+    {
+      type: 'morningIn',
+      setting: settings.morningIn,
+      needReminder: !data || data.date !== today || !data.session1?.checkIn
+    },
+    {
+      type: 'noon',
+      setting: settings.noon,
+      needReminder: !data || data.date !== today || !data.session1?.checkOut
+    },
+    {
+      type: 'afternoonIn',
+      setting: settings.afternoonIn,
+      needReminder: !data || data.date !== today || !data.session2?.checkIn
+    },
+    {
+      type: 'evening',
+      setting: settings.evening,
+      needReminder: !data || data.date !== today || !data.session2?.checkOut
+    }
+  ];
+
+  for (const check of checks) {
+    if (check.setting && check.setting.enabled && isTimeValidForReminder(check.type) && check.needReminder) {
+      console.log(`Đang trong khung giờ ${check.type} và chưa chấm công → nhắc ngay!`);
+      pendingNotifications[check.type] = true;
+      showReminderPopup(check.type);
+      startRepeatAlarm(check.type);
+      return; // Chỉ nhắc 1 loại tại 1 thời điểm
+    }
+  }
 }
 
 // Tạo alarm hàng ngày
