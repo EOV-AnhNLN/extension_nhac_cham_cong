@@ -24,10 +24,26 @@ function parseTimekeeping(text) {
     };
 }
 
+// Tìm index cột theo tên header (tìm trong thead)
+function findColumnIndex(headerName) {
+    const headers = document.querySelectorAll('table thead th, .table thead th, [class*="table"] thead th');
+    for (let i = 0; i < headers.length; i++) {
+        const text = headers[i].textContent.trim().toLowerCase();
+        if (text.includes(headerName.toLowerCase())) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // Hàm tìm và trích xuất dữ liệu chấm công của ngày hôm nay
 function extractTimekeepingData() {
     const todayStr = getTodayString();
     console.log('Đang tìm dữ liệu cho ngày:', todayStr);
+
+    // Tìm index cột "Công" từ header (để biết ngày đó OFF hay không)
+    const congColIndex = findColumnIndex('công');
+    console.log('Cột Công index:', congColIndex);
 
     // Tìm tất cả các hàng trong bảng
     const rows = document.querySelectorAll('table tbody tr, .table tbody tr, [class*="table"] tbody tr');
@@ -37,7 +53,8 @@ function extractTimekeepingData() {
         found: false,
         session1: { checkIn: null, checkOut: null },
         session2: { checkIn: null, checkOut: null },
-        shift: null
+        shift: null,
+        workStatus: null  // "OFF" nếu nghỉ, khác nếu đi làm
     };
 
     for (const row of rows) {
@@ -52,6 +69,12 @@ function extractTimekeepingData() {
 
         if (dateText === todayStr) {
             result.found = true;
+
+            // Cột "Công" - lấy từ index tìm được hoặc null
+            if (congColIndex >= 0 && cells[congColIndex]) {
+                result.workStatus = cells[congColIndex].textContent.trim();
+                console.log('Work status:', result.workStatus);
+            }
 
             // Cột "Ca làm việc" - index 7
             if (cells[7]) {

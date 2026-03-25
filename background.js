@@ -27,6 +27,7 @@ let timekeepingData = {
   found: false,
   session1: { checkIn: null, checkOut: null },
   session2: { checkIn: null, checkOut: null },
+  workStatus: null,
   lastUpdated: null
 };
 
@@ -41,8 +42,84 @@ function isValidTimekeeping(val) {
   return val && typeof val === 'string' && val.trim() !== '' && !/^_+$/.test(val.trim());
 }
 
+// Parse giờ từ chuỗi thời gian ("08:20" → 8.33, "13:23" → 13.38)
+function parseHour(timeStr) {
+  if (!isValidTimekeeping(timeStr)) return null;
+  const parts = timeStr.trim().split(':');
+  if (parts.length >= 2) {
+    return parseInt(parts[0]) + parseInt(parts[1]) / 60;
+  }
+  return null;
+}
+
+// Xác định thực tế đã chấm công gì
+// Trường hợp nghỉ sáng: session1 chứa giờ chiều (checkIn >= 12:00), session2 trống
+// Trường hợp bình thường: session1 = buổi sáng, session2 = buổi chiều
+function getEffectiveTimekeeping(data) {
+  const result = {
+    morningCheckIn: null,     // checkin sáng
+    morningCheckOut: null,    // checkout trưa
+    afternoonCheckIn: null,   // checkin chiều
+    afternoonCheckOut: null,  // checkout chiều
+    isAfternoonOnly: false    // true = nghỉ sáng, chỉ làm chiều
+  };
+
+  if (!data || !data.found) return result;
+
+  const s1In = data.session1?.checkIn;
+  const s1Out = data.session1?.checkOut;
+  const s2In = data.session2?.checkIn;
+  const s2Out = data.session2?.checkOut;
+
+  const s1InHour = parseHour(s1In);
+
+  // Nếu session1.checkIn >= 12:00 và session2 trống → nghỉ sáng, chỉ chấm chiều
+  if (s1InHour !== null && s1InHour >= 12 && !isValidTimekeeping(s2In) && !isValidTimekeeping(s2Out)) {
+    result.isAfternoonOnly = true;
+    result.morningCheckIn = 'OFF';    // Nghỉ sáng
+    result.morningCheckOut = 'OFF';   // Nghỉ sáng
+    result.afternoonCheckIn = s1In;   // Checkin chiều nằm ở session1
+    result.afternoonCheckOut = s1Out; // Checkout chiều nằm ở session1
+  } else {
+    // Trường hợp bình thường
+    result.morningCheckIn = s1In;
+    result.morningCheckOut = s1Out;
+    result.afternoonCheckIn = s2In;
+    result.afternoonCheckOut = s2Out;
+  }
+
+  return result;
+}
+
+// Kiểm tra 1 field effective đã hoàn thành chưa
+function isEffectiveDone(val) {
+  return val === 'OFF' || isValidTimekeeping(val);
+}
+
 // URL trang chấm công FastWork
 const FASTWORK_URL = 'https://app.fastwork.vn/timekeepingpersonal#!/';
+
+// Kiểm tra hôm nay có phải ngày OFF không (dựa vào cột "Công" từ FastWork)
+async function checkIfDayOff() {
+  const today = getTodayString();
+  const result = await chrome.storage.local.get(['timekeepingData']);
+  const data = result.timekeepingData;
+
+  if (data && data.date === today && data.workStatus !== null && data.workStatus !== undefined) {
+    const status = data.workStatus.toLowerCase().trim();
+    // "OFF" = nghỉ (từ FastWork), các giá trị số (1, 0.96, 0.98...) = đi làm
+    if (status === 'off') {
+      console.log(`[dayOff] Hôm nay ${today} là ngày OFF (workStatus="${data.workStatus}")`);
+      return true;
+    }
+    console.log(`[dayOff] Hôm nay ${today} workStatus="${data.workStatus}" → đi làm`);
+    return false;
+  }
+
+  // Chưa có dữ liệu workStatus → không biết, mặc định = đi làm (sẽ nhắc)
+  console.log(`[dayOff] Chưa có workStatus cho ${today}, mặc định đi làm`);
+  return false;
+}
 
 // Khởi tạo khi extension được cài đặt
 chrome.runtime.onInstalled.addListener(() => {
@@ -212,6 +289,7 @@ async function resetForNewDay() {
       found: false,
       session1: { checkIn: null, checkOut: null },
       session2: { checkIn: null, checkOut: null },
+      workStatus: null,
       lastUpdated: null
     };
     await chrome.storage.local.set({ timekeepingData });
@@ -265,13 +343,13 @@ async function handleMorningInReminder() {
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
-  // Kiểm tra đã checkin buổi sáng chưa
-  if (!isValidTimekeeping(timekeepingData.session1.checkIn)) {
+  const eff = getEffectiveTimekeeping(timekeepingData);
+  if (!isEffectiveDone(eff.morningCheckIn)) {
     pendingNotifications.morningIn = true;
     showReminderPopup('morningIn');
     startRepeatAlarm('morningIn');
   } else {
-    console.log('Đã checkin buổi sáng, không cần nhắc');
+    console.log('Đã checkin buổi sáng (hoặc nghỉ sáng), không cần nhắc');
   }
 }
 
@@ -280,13 +358,13 @@ async function handleNoonReminder() {
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
-  // Kiểm tra đã chấm công ra buổi sáng chưa
-  if (!isValidTimekeeping(timekeepingData.session1.checkOut)) {
+  const eff = getEffectiveTimekeeping(timekeepingData);
+  if (!isEffectiveDone(eff.morningCheckOut)) {
     pendingNotifications.noon = true;
     showReminderPopup('noon');
     startRepeatAlarm('noon');
   } else {
-    console.log('Đã chấm công ra buổi sáng, không cần nhắc');
+    console.log('Đã checkout trưa (hoặc nghỉ sáng), không cần nhắc');
   }
 }
 
@@ -295,8 +373,8 @@ async function handleAfternoonInReminder() {
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
-  // Kiểm tra đã checkin buổi chiều chưa
-  if (!isValidTimekeeping(timekeepingData.session2.checkIn)) {
+  const eff = getEffectiveTimekeeping(timekeepingData);
+  if (!isEffectiveDone(eff.afternoonCheckIn)) {
     pendingNotifications.afternoonIn = true;
     showReminderPopup('afternoonIn');
     startRepeatAlarm('afternoonIn');
@@ -310,13 +388,13 @@ async function handleEveningReminder() {
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
-  // Kiểm tra đã chấm công ra buổi chiều chưa
-  if (!isValidTimekeeping(timekeepingData.session2.checkOut)) {
+  const eff = getEffectiveTimekeeping(timekeepingData);
+  if (!isEffectiveDone(eff.afternoonCheckOut)) {
     pendingNotifications.evening = true;
     showReminderPopup('evening');
     startRepeatAlarm('evening');
   } else {
-    console.log('Đã chấm công ra buổi chiều, không cần nhắc');
+    console.log('Đã checkout buổi chiều, không cần nhắc');
   }
 }
 
@@ -473,14 +551,15 @@ async function recheckAfterDismiss(type) {
   if (data && data.found) {
     // Chỉ dùng dữ liệu nếu đúng ngày hôm nay
     if (data.date === today) {
+      const eff = getEffectiveTimekeeping(data);
       if (type === 'morningIn') {
-        needReminder = !isValidTimekeeping(data.session1?.checkIn);
+        needReminder = !isEffectiveDone(eff.morningCheckIn);
       } else if (type === 'noon') {
-        needReminder = !isValidTimekeeping(data.session1?.checkOut);
+        needReminder = !isEffectiveDone(eff.morningCheckOut);
       } else if (type === 'afternoonIn') {
-        needReminder = !isValidTimekeeping(data.session2?.checkIn);
+        needReminder = !isEffectiveDone(eff.afternoonCheckIn);
       } else if (type === 'evening') {
-        needReminder = !isValidTimekeeping(data.session2?.checkOut);
+        needReminder = !isEffectiveDone(eff.afternoonCheckOut);
       }
     } else {
       // Dữ liệu cũ ngày khác, không tin cậy → nhắc nếu còn trong khung giờ
@@ -691,14 +770,15 @@ async function updatePollingFrequency() {
   const hour = now.getHours();
   const day = now.getDay(); // 0=CN, 6=T7
 
-  // Giảm tần suất cuối tuần
-  if (day === 0 || day === 6) {
+  // Giảm tần suất ngày OFF
+  const isDayOff = await checkIfDayOff();
+  if (isDayOff) {
     await chrome.alarms.clear('check-fastwork');
     chrome.alarms.create('check-fastwork', {
       delayInMinutes: 60,
       periodInMinutes: 60
     });
-    console.log('Polling cuối tuần: mỗi 60 phút');
+    console.log('Polling ngày OFF: mỗi 60 phút');
     return;
   }
 
@@ -711,13 +791,13 @@ async function updatePollingFrequency() {
   if (hour >= 7 && hour < 10) {
     // Gần giờ sáng - kiểm tra checkin buổi sáng
     needFrequentPoll = !data || data.date !== today || !data.session1?.checkIn;
-  } else if (hour >= 11 && hour < 14) {
+  } else if (hour >= 12 && hour < 14) {
     // Gần giờ trưa - kiểm tra checkout buổi sáng
     needFrequentPoll = !data || data.date !== today || !data.session1?.checkOut;
-  } else if (hour >= 13 && hour < 15) {
+  } else if (hour >= 12 && hour < 15) {
     // Gần giờ chiều - kiểm tra checkin buổi chiều
     needFrequentPoll = !data || data.date !== today || !data.session2?.checkIn;
-  } else if (hour >= 16) {
+  } else if (hour >= 17) {
     // Gần giờ về - kiểm tra checkout buổi chiều
     needFrequentPoll = !data || data.date !== today || !data.session2?.checkOut;
   }
@@ -732,10 +812,10 @@ async function updatePollingFrequency() {
     console.log('Polling nhanh: mỗi 30 giây (chưa chấm công)');
   } else {
     chrome.alarms.create('check-fastwork', {
-      delayInMinutes: 30,
-      periodInMinutes: 30
+      delayInMinutes: 60,
+      periodInMinutes: 60
     });
-    console.log('Polling bình thường: mỗi 30 phút');
+    console.log('Polling bình thường: mỗi 60 phút');
   }
 }
 
@@ -782,11 +862,11 @@ async function initializeAlarms() {
   // Tạo alarm kiểm tra đồng bộ lúc 13:00
   createDailyAlarm('check-sync', 13, 0);
 
-  // Watchdog: kiểm tra nhắc nhở mỗi 3 phút (backup cho trường hợp alarm chính bị miss)
+  // Watchdog: kiểm tra nhắc nhở mỗi 5 phút (backup cho trường hợp alarm chính bị miss)
   // Chrome MV3 minimum period = 1 phút
   chrome.alarms.create('watchdog', {
-    delayInMinutes: 3,
-    periodInMinutes: 3
+    delayInMinutes: 5,
+    periodInMinutes: 5
   });
 
   console.log('Alarms đã được khởi tạo');
@@ -805,10 +885,10 @@ async function checkImmediateReminders(settings) {
   const today = getTodayString();
   console.log(`[checkImmediate] ====== Bắt đầu kiểm tra lúc ${now.toLocaleTimeString()} (${today}) ======`);
 
-  // Kiểm tra ngày trong tuần (không nhắc T7, CN)
-  const day = now.getDay();
-  if (day === 0 || day === 6) {
-    console.log('[checkImmediate] Cuối tuần, bỏ qua');
+  // Kiểm tra ngày OFF (dựa vào cột "Công" từ FastWork thay vì hardcode T7/CN)
+  const isDayOff = await checkIfDayOff();
+  if (isDayOff) {
+    console.log('[checkImmediate] Ngày OFF, bỏ qua');
     return;
   }
 
@@ -819,22 +899,26 @@ async function checkImmediateReminders(settings) {
   console.log('[checkImmediate] Data từ storage:', JSON.stringify(data));
   console.log('[checkImmediate] pendingNotifications:', JSON.stringify(pendingNotifications));
 
-  // Danh sách kiểm tra với field mapping
+  const hasData = data && data.date === today && data.found;
+
+  // Danh sách kiểm tra với effective mapping (xử lý cả case nghỉ sáng)
+  const eff = hasData ? getEffectiveTimekeeping(data) : null;
   const checks = [
-    { type: 'morningIn', setting: settings?.morningIn, field: 'session1', subField: 'checkIn' },
-    { type: 'noon', setting: settings?.noon, field: 'session1', subField: 'checkOut' },
-    { type: 'afternoonIn', setting: settings?.afternoonIn, field: 'session2', subField: 'checkIn' },
-    { type: 'evening', setting: settings?.evening, field: 'session2', subField: 'checkOut' }
+    { type: 'morningIn', setting: settings?.morningIn, effectiveValue: eff?.morningCheckIn },
+    { type: 'noon', setting: settings?.noon, effectiveValue: eff?.morningCheckOut },
+    { type: 'afternoonIn', setting: settings?.afternoonIn, effectiveValue: eff?.afternoonCheckIn },
+    { type: 'evening', setting: settings?.evening, effectiveValue: eff?.afternoonCheckOut }
   ];
+
+  if (eff) {
+    console.log(`[checkImmediate] Effective: afternoonOnly=${eff.isAfternoonOnly}, morningIn=${eff.morningCheckIn}, morningOut=${eff.morningCheckOut}, afternoonIn=${eff.afternoonCheckIn}, afternoonOut=${eff.afternoonCheckOut}`);
+  }
 
   for (const check of checks) {
     const enabled = check.setting?.enabled;
     const inTimeWindow = isTimeValidForReminder(check.type);
     const pending = pendingNotifications[check.type];
-    const hasData = data && data.date === today && data.found;
-    const rawValue = hasData ? data[check.field]?.[check.subField] : null;
-    // "_____" từ FastWork nghĩa là chưa chấm công
-    const alreadyDone = rawValue && !/^_+$/.test(rawValue);
+    const alreadyDone = hasData && isEffectiveDone(check.effectiveValue);
 
     console.log(`[checkImmediate] ${check.type}: enabled=${enabled}, inTimeWindow=${inTimeWindow}, pending=${pending}, hasData=${hasData}, alreadyDone=${alreadyDone}`);
 
@@ -988,17 +1072,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       closeHiddenFetchWindow();
     }
 
-    // Kiểm tra và dừng thông báo nếu đã chấm công
-    if (isValidTimekeeping(timekeepingData.session1.checkIn) && pendingNotifications.morningIn) {
+    // Kiểm tra và dừng thông báo nếu đã chấm công (dùng effective mapping)
+    const eff = getEffectiveTimekeeping(timekeepingData);
+    if (isEffectiveDone(eff.morningCheckIn) && pendingNotifications.morningIn) {
       dismissReminder('morningIn');
     }
-    if (isValidTimekeeping(timekeepingData.session1.checkOut) && pendingNotifications.noon) {
+    if (isEffectiveDone(eff.morningCheckOut) && pendingNotifications.noon) {
       dismissReminder('noon');
     }
-    if (isValidTimekeeping(timekeepingData.session2.checkIn) && pendingNotifications.afternoonIn) {
+    if (isEffectiveDone(eff.afternoonCheckIn) && pendingNotifications.afternoonIn) {
       dismissReminder('afternoonIn');
     }
-    if (isValidTimekeeping(timekeepingData.session2.checkOut) && pendingNotifications.evening) {
+    if (isEffectiveDone(eff.afternoonCheckOut) && pendingNotifications.evening) {
       dismissReminder('evening');
     }
 

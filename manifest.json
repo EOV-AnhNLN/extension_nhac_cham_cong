@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Nhắc Nhở Chấm Công",
-    "version": "1.1.0",
+    "version": "1.2.1",
     "description": "Extension nhắc nhở chấm công vào lúc 12:00 và 17:00, tự động kiểm tra trạng thái từ FastWork",
     "permissions": [
         "alarms",
