@@ -785,21 +785,23 @@ async function updatePollingFrequency() {
   const result = await chrome.storage.local.get(['timekeepingData']);
   const data = result.timekeepingData;
   const today = getTodayString();
+  const hasData = data && data.date === today && data.found;
+  const eff = hasData ? getEffectiveTimekeeping(data) : null;
 
   let needFrequentPoll = false;
 
   if (hour >= 7 && hour < 10) {
     // Gần giờ sáng - kiểm tra checkin buổi sáng
-    needFrequentPoll = !data || data.date !== today || !data.session1?.checkIn;
+    needFrequentPoll = !eff || !isEffectiveDone(eff.morningCheckIn);
   } else if (hour >= 12 && hour < 14) {
     // Gần giờ trưa - kiểm tra checkout buổi sáng
-    needFrequentPoll = !data || data.date !== today || !data.session1?.checkOut;
+    needFrequentPoll = !eff || !isEffectiveDone(eff.morningCheckOut);
   } else if (hour >= 12 && hour < 15) {
     // Gần giờ chiều - kiểm tra checkin buổi chiều
-    needFrequentPoll = !data || data.date !== today || !data.session2?.checkIn;
+    needFrequentPoll = !eff || !isEffectiveDone(eff.afternoonCheckIn);
   } else if (hour >= 17) {
     // Gần giờ về - kiểm tra checkout buổi chiều
-    needFrequentPoll = !data || data.date !== today || !data.session2?.checkOut;
+    needFrequentPoll = !eff || !isEffectiveDone(eff.afternoonCheckOut);
   }
 
   await chrome.alarms.clear('check-fastwork');
