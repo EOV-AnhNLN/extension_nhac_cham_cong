@@ -29,6 +29,37 @@ header h1 {
   font-weight: 600;
 }
 
+/* Master Toggle */
+.master-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 12px;
+  color: white;
+}
+
+.master-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.master-toggle .slider {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
+.master-toggle input:checked + .slider {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+#main-content.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+  filter: grayscale(0.5);
+}
+
 /* Timekeeping Status */
 .timekeeping-status {
   background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);

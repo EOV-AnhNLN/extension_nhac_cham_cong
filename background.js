@@ -127,6 +127,16 @@ chrome.runtime.onInstalled.addListener(() => {
   initializeAlarms().catch(e => console.error('Lỗi initializeAlarms (onInstalled):', e));
 });
 
+// Kiểm tra extension có đang bật không
+async function isExtensionEnabled() {
+  return new Promise((resolve) => {
+    chrome.storage.sync.get(['extensionEnabled'], (result) => {
+      // Mặc định là bật (true) nếu chưa có giá trị
+      resolve(result.extensionEnabled !== false);
+    });
+  });
+}
+
 // Khởi tạo khi Chrome khởi động
 chrome.runtime.onStartup.addListener(() => {
   console.log('=== Chrome đã khởi động ===');
@@ -136,6 +146,13 @@ chrome.runtime.onStartup.addListener(() => {
 // Xử lý khi alarm được kích hoạt
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log('Alarm triggered:', alarm.name);
+
+  // Nếu extension tắt, chỉ cho phép watchdog chạy (để có thể khôi phục khi bật lại)
+  const enabled = await isExtensionEnabled();
+  if (!enabled && alarm.name !== 'watchdog') {
+    console.log(`[alarm] Extension đang tắt, bỏ qua alarm: ${alarm.name}`);
+    return;
+  }
 
   if (alarm.name === 'morningIn-reminder') {
     console.log('[alarm] Kích hoạt morningIn-reminder');
@@ -174,7 +191,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   } else if (alarm.name === 'recheck-sync') {
     await checkSyncStatus();
   } else if (alarm.name === 'watchdog') {
-    await handleWatchdog();
+    // Watchdog luôn chạy, nhưng chỉ kiểm tra nếu extension bật
+    if (enabled) {
+      await handleWatchdog();
+    }
   }
 });
 
@@ -834,6 +854,28 @@ async function initializeAlarms() {
   // Reset trạng thái nếu qua ngày mới
   await resetForNewDay();
 
+  // Kiểm tra extension có bật không
+  const enabled = await isExtensionEnabled();
+  if (!enabled) {
+    console.log('[initAlarms] Extension đang tắt, chỉ tạo watchdog');
+    // Xóa tất cả alarm trừ watchdog
+    const allAlarms = await chrome.alarms.getAll();
+    for (const alarm of allAlarms) {
+      if (alarm.name !== 'watchdog') {
+        await chrome.alarms.clear(alarm.name);
+      }
+    }
+    // Đảm bảo watchdog vẫn chạy
+    const hasWatchdog = allAlarms.some(a => a.name === 'watchdog');
+    if (!hasWatchdog) {
+      chrome.alarms.create('watchdog', {
+        delayInMinutes: 5,
+        periodInMinutes: 5
+      });
+    }
+    return;
+  }
+
   const settings = await getSettings();
 
   // Xóa tất cả alarm cũ (bao gồm cả repeat và recheck)
@@ -1029,6 +1071,40 @@ async function saveSettings(settings) {
 
 // Lắng nghe message
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getExtensionEnabled') {
+    isExtensionEnabled().then((enabled) => {
+      sendResponse({ enabled });
+    });
+    return true;
+  }
+
+  if (request.action === 'setExtensionEnabled') {
+    chrome.storage.sync.set({ extensionEnabled: request.enabled }, async () => {
+      if (request.enabled) {
+        console.log('[toggle] Extension BẬT - khởi tạo lại alarms');
+        await initializeAlarms();
+      } else {
+        console.log('[toggle] Extension TẮT - xóa alarms và dừng thông báo');
+        // Xóa tất cả alarms trừ watchdog
+        const allAlarms = await chrome.alarms.getAll();
+        for (const alarm of allAlarms) {
+          if (alarm.name !== 'watchdog') {
+            await chrome.alarms.clear(alarm.name);
+          }
+        }
+        // Reset pending notifications
+        Object.keys(pendingNotifications).forEach(k => pendingNotifications[k] = false);
+        // Đóng cửa sổ reminder nếu đang mở
+        if (reminderWindowId) {
+          try { await chrome.windows.remove(reminderWindowId); } catch (e) {}
+          reminderWindowId = null;
+        }
+      }
+      sendResponse({ success: true });
+    });
+    return true;
+  }
+
   if (request.action === 'getSettings') {
     getSettings().then((settings) => {
       sendResponse({ settings });

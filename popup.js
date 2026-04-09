@@ -1,4 +1,6 @@
 // DOM Elements
+const extensionEnabledEl = document.getElementById('extension-enabled');
+const mainContent = document.getElementById('main-content');
 const morningInEnabled = document.getElementById('morningIn-enabled');
 const morningInTime = document.getElementById('morningIn-time');
 const noonEnabled = document.getElementById('noon-enabled');
@@ -19,11 +21,13 @@ const openFastworkBtn = document.getElementById('open-fastwork');
 
 // Load khi popup mở
 document.addEventListener('DOMContentLoaded', () => {
+    loadExtensionEnabled();
     loadSettings();
     loadTimekeepingStatus();
 });
 
 // Lắng nghe sự kiện
+extensionEnabledEl.addEventListener('change', toggleExtension);
 saveBtn.addEventListener('click', saveSettings);
 testMorningInBtn.addEventListener('click', () => testNotification('morningIn'));
 testNoonBtn.addEventListener('click', () => testNotification('noon'));
@@ -180,6 +184,36 @@ function showStatus(message, type) {
     setTimeout(() => {
         statusEl.className = 'status';
     }, 3000);
+}
+
+// Load trạng thái bật/tắt extension
+function loadExtensionEnabled() {
+    chrome.runtime.sendMessage({ action: 'getExtensionEnabled' }, (response) => {
+        if (response) {
+            extensionEnabledEl.checked = response.enabled;
+            updateMainContentState(response.enabled);
+        }
+    });
+}
+
+// Bật/tắt extension
+function toggleExtension() {
+    const enabled = extensionEnabledEl.checked;
+    chrome.runtime.sendMessage({ action: 'setExtensionEnabled', enabled }, (response) => {
+        if (response && response.success) {
+            updateMainContentState(enabled);
+            showStatus(enabled ? '✅ Extension đã bật!' : '⏸️ Extension đã tắt!', 'success');
+        }
+    });
+}
+
+// Cập nhật trạng thái giao diện
+function updateMainContentState(enabled) {
+    if (enabled) {
+        mainContent.classList.remove('disabled');
+    } else {
+        mainContent.classList.add('disabled');
+    }
 }
 
 // Format thời gian
