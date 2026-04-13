@@ -69,7 +69,7 @@ let timekeepingData = {
 const REPEAT_INTERVAL_MINUTES = 3;
 
 // Thời gian kiểm tra lại sau khi dismiss (phút)
-const RECHECK_AFTER_DISMISS_MINUTES = 5;
+const RECHECK_AFTER_DISMISS_MINUTES = 1;
 
 // Debounce: thời gian tối thiểu giữa 2 lần hiển thị popup cùng loại (ms)
 const POPUP_DEBOUNCE_MS = 10000; // 10 giây
