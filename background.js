@@ -18,6 +18,40 @@ let pendingNotifications = {
 // Lưu ID popup window đang mở
 let reminderWindowId = null;
 
+// Lock để tránh tạo popup đồng thời
+let isCreatingPopup = false;
+
+// Khôi phục state từ storage khi service worker restart
+async function restoreState() {
+  try {
+    const result = await chrome.storage.local.get(['reminderWindowId', 'pendingNotifications']);
+    if (result.reminderWindowId) {
+      reminderWindowId = result.reminderWindowId;
+      // Kiểm tra window còn tồn tại không
+      try {
+        await chrome.windows.get(reminderWindowId);
+      } catch (e) {
+        reminderWindowId = null;
+        await chrome.storage.local.remove('reminderWindowId');
+      }
+    }
+    if (result.pendingNotifications) {
+      Object.assign(pendingNotifications, result.pendingNotifications);
+    }
+    console.log('[restore] reminderWindowId:', reminderWindowId, 'pending:', JSON.stringify(pendingNotifications));
+  } catch (e) {
+    console.error('[restore] Lỗi:', e);
+  }
+}
+
+// Lưu state vào storage
+async function saveState() {
+  await chrome.storage.local.set({
+    reminderWindowId,
+    pendingNotifications
+  });
+}
+
 // Lưu ID cửa sổ ẩn để fetch dữ liệu FastWork ngầm
 let hiddenFetchWindowId = null;
 
@@ -32,10 +66,14 @@ let timekeepingData = {
 };
 
 // Thời gian lặp lại thông báo (phút)
-const REPEAT_INTERVAL_MINUTES = 1;
+const REPEAT_INTERVAL_MINUTES = 3;
 
 // Thời gian kiểm tra lại sau khi dismiss (phút)
-const RECHECK_AFTER_DISMISS_MINUTES = 1;
+const RECHECK_AFTER_DISMISS_MINUTES = 5;
+
+// Debounce: thời gian tối thiểu giữa 2 lần hiển thị popup cùng loại (ms)
+const POPUP_DEBOUNCE_MS = 10000; // 10 giây
+let lastPopupTime = {};
 
 // Kiểm tra giá trị chấm công có hợp lệ không (không phải null/undefined/""/"_____")
 function isValidTimekeeping(val) {
@@ -203,6 +241,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 (async () => {
   console.log('=== Service worker loaded ===');
   try {
+    // Khôi phục state từ storage
+    await restoreState();
+
     // Kiểm tra xem alarms đã có chưa
     const existingAlarms = await chrome.alarms.getAll();
     console.log(`[startup] Có ${existingAlarms.length} alarms:`, existingAlarms.map(a => a.name));
@@ -238,6 +279,7 @@ async function checkSyncStatus() {
     if (!data || !data.found || data.date !== today) {
       console.log('Chưa đồng bộ dữ liệu hôm nay, nhắc nhở...');
       pendingNotifications.sync = true;
+      await saveState();
       showSyncReminderPopup();
       startRepeatAlarm('sync');
     } else {
@@ -248,23 +290,29 @@ async function checkSyncStatus() {
 
 // Hiển thị popup nhắc đồng bộ
 async function showSyncReminderPopup() {
-  if (reminderWindowId) {
-    try {
-      await chrome.windows.remove(reminderWindowId);
-    } catch (e) { }
+  if (isCreatingPopup) return;
+  isCreatingPopup = true;
+
+  try {
+    await closeAllReminderPopups();
+
+    const popup = await chrome.windows.create({
+      url: 'reminder.html?type=sync',
+      type: 'popup',
+      width: 340,
+      height: 220,
+      top: 20,
+      left: 1560,
+      focused: true
+    });
+
+    reminderWindowId = popup.id;
+    await saveState();
+  } catch (e) {
+    console.error('[popup] Không tạo được sync popup:', e);
+  } finally {
+    isCreatingPopup = false;
   }
-
-  const popup = await chrome.windows.create({
-    url: 'reminder.html?type=sync',
-    type: 'popup',
-    width: 340,
-    height: 220,
-    top: 20,
-    left: 1560,
-    focused: true
-  });
-
-  reminderWindowId = popup.id;
 }
 
 // Lấy ngày hôm nay dạng DD/MM/YYYY
@@ -291,6 +339,7 @@ async function resetForNewDay() {
     pendingNotifications.afternoonIn = false;
     pendingNotifications.evening = false;
     pendingNotifications.sync = false;
+    await saveState();
 
     // Xóa các alarm recheck và repeat cũ
     await chrome.alarms.clear('recheck-morningIn');
@@ -360,12 +409,17 @@ function isTimeValidForReminder(type) {
 
 // Xử lý nhắc nhở checkin sáng (8:00)
 async function handleMorningInReminder() {
+  if (pendingNotifications.morningIn) {
+    console.log('morningIn đang pending, bỏ qua');
+    return;
+  }
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
   const eff = getEffectiveTimekeeping(timekeepingData);
   if (!isEffectiveDone(eff.morningCheckIn)) {
     pendingNotifications.morningIn = true;
+    await saveState();
     showReminderPopup('morningIn');
     startRepeatAlarm('morningIn');
   } else {
@@ -375,12 +429,17 @@ async function handleMorningInReminder() {
 
 // Xử lý nhắc nhở checkout trưa (12:00)
 async function handleNoonReminder() {
+  if (pendingNotifications.noon) {
+    console.log('noon đang pending, bỏ qua');
+    return;
+  }
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
   const eff = getEffectiveTimekeeping(timekeepingData);
   if (!isEffectiveDone(eff.morningCheckOut)) {
     pendingNotifications.noon = true;
+    await saveState();
     showReminderPopup('noon');
     startRepeatAlarm('noon');
   } else {
@@ -390,12 +449,17 @@ async function handleNoonReminder() {
 
 // Xử lý nhắc nhở checkin chiều (13:30)
 async function handleAfternoonInReminder() {
+  if (pendingNotifications.afternoonIn) {
+    console.log('afternoonIn đang pending, bỏ qua');
+    return;
+  }
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
   const eff = getEffectiveTimekeeping(timekeepingData);
   if (!isEffectiveDone(eff.afternoonCheckIn)) {
     pendingNotifications.afternoonIn = true;
+    await saveState();
     showReminderPopup('afternoonIn');
     startRepeatAlarm('afternoonIn');
   } else {
@@ -405,12 +469,17 @@ async function handleAfternoonInReminder() {
 
 // Xử lý nhắc nhở checkout chiều (17:00)
 async function handleEveningReminder() {
+  if (pendingNotifications.evening) {
+    console.log('evening đang pending, bỏ qua');
+    return;
+  }
   await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
   const eff = getEffectiveTimekeeping(timekeepingData);
   if (!isEffectiveDone(eff.afternoonCheckOut)) {
     pendingNotifications.evening = true;
+    await saveState();
     showReminderPopup('evening');
     startRepeatAlarm('evening');
   } else {
@@ -418,22 +487,52 @@ async function handleEveningReminder() {
   }
 }
 
+// Tìm và đóng TẤT CẢ popup reminder đang mở (dựa vào URL)
+async function closeAllReminderPopups() {
+  try {
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    for (const win of allWindows) {
+      if (win.type === 'popup' && win.tabs) {
+        for (const tab of win.tabs) {
+          if (tab.url && tab.url.includes('reminder.html')) {
+            console.log(`[popup] Đóng popup cũ (tìm theo URL): windowId=${win.id}`);
+            try {
+              await chrome.windows.remove(win.id);
+            } catch (e) { /* đã đóng */ }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[popup] Lỗi khi tìm popup cũ:', e);
+  }
+  reminderWindowId = null;
+}
+
 // Hiển thị popup window nhắc nhở
 async function showReminderPopup(type) {
-  console.log(`[popup] Tạo popup cho: ${type}`);
-
-  // Đóng popup cũ nếu có
-  if (reminderWindowId) {
-    try {
-      await chrome.windows.remove(reminderWindowId);
-      console.log(`[popup] Đã đóng popup cũ: ${reminderWindowId}`);
-    } catch (e) {
-      // Window đã bị đóng
-    }
-    reminderWindowId = null;
+  // Lock: tránh tạo popup đồng thời từ nhiều nguồn
+  if (isCreatingPopup) {
+    console.log(`[popup] Đang tạo popup khác, bỏ qua ${type}`);
+    return;
   }
 
+  // Debounce: tránh tạo popup liên tục trong thời gian ngắn
+  const now = Date.now();
+  if (lastPopupTime[type] && (now - lastPopupTime[type]) < POPUP_DEBOUNCE_MS) {
+    console.log(`[popup] Debounce ${type}: chỉ mới ${now - lastPopupTime[type]}ms từ lần trước`);
+    return;
+  }
+
+  isCreatingPopup = true;
+  lastPopupTime[type] = now;
+
+  console.log(`[popup] Tạo popup cho: ${type}`);
+
   try {
+    // Đóng TẤT CẢ popup reminder cũ (kể cả từ service worker trước)
+    await closeAllReminderPopups();
+
     // Tạo popup window nhỏ gọn ở góc phải trên
     const popup = await chrome.windows.create({
       url: `reminder.html?type=${type}`,
@@ -446,13 +545,15 @@ async function showReminderPopup(type) {
     });
 
     reminderWindowId = popup.id;
+    await saveState();
     console.log(`[popup] Popup ${type} đã tạo xong, windowId=${popup.id}`);
   } catch (e) {
     console.error(`[popup] KHÔNG TẠO ĐƯỢC POPUP ${type}:`, e);
+    // Chỉ gửi notification hệ thống khi KHÔNG tạo được popup
+    showSystemNotification(type);
+  } finally {
+    isCreatingPopup = false;
   }
-
-  // Cũng gửi notification hệ thống (backup)
-  showSystemNotification(type);
 }
 
 // Hiển thị notification hệ thống (backup)
@@ -519,9 +620,10 @@ chrome.notifications.onClosed.addListener((notificationId, byUser) => {
 });
 
 // Dọn dẹp khi cửa sổ bị đóng
-chrome.windows.onRemoved.addListener((windowId) => {
+chrome.windows.onRemoved.addListener(async (windowId) => {
   if (windowId === reminderWindowId) {
     reminderWindowId = null;
+    await chrome.storage.local.remove('reminderWindowId');
   }
   if (windowId === hiddenFetchWindowId) {
     hiddenFetchWindowId = null;
@@ -529,8 +631,9 @@ chrome.windows.onRemoved.addListener((windowId) => {
 });
 
 // Dismiss reminder và dừng lặp, nhưng đặt alarm kiểm tra lại
-function dismissReminder(type) {
+async function dismissReminder(type) {
   pendingNotifications[type] = false;
+  await saveState();
   chrome.alarms.clear(`repeat-${type}`);
   chrome.notifications.clear(`${type}-reminder`);
 
@@ -591,6 +694,7 @@ async function recheckAfterDismiss(type) {
   if (needReminder) {
     console.log(`Chưa chấm công ${type}, nhắc lại!`);
     pendingNotifications[type] = true;
+    await saveState();
     showReminderPopup(type);
     startRepeatAlarm(type);
   } else {
@@ -974,6 +1078,7 @@ async function checkImmediateReminders(settings) {
     // CẦN NHẮC → hiển thị ngay, KHÔNG đợi fetch
     console.log(`[checkImmediate] >>> NHẮC NGAY: ${check.type} <<<`);
     pendingNotifications[check.type] = true;
+    await saveState();
 
     try {
       await showReminderPopup(check.type);
@@ -1025,11 +1130,15 @@ function createDailyAlarm(name, hour, minute) {
     // Giờ đã qua → kiểm tra nếu vẫn trong khung giờ hợp lệ thì kích hoạt ngay (1 phút)
     const type = name.replace('-reminder', '');
     if (isTimeValidForReminder(type)) {
+      // Không cần kích hoạt ngay vì checkImmediateReminders() đã xử lý
+      // Đặt cho ngày mai để tránh race condition tạo popup trùng
+      alarmTime.setDate(alarmTime.getDate() + 1);
+      const delayTomorrow = (alarmTime.getTime() - now.getTime()) / (1000 * 60);
       chrome.alarms.create(name, {
-        delayInMinutes: 0.1,  // Kích hoạt gần như ngay lập tức
+        delayInMinutes: delayTomorrow,
         periodInMinutes: 24 * 60
       });
-      console.log(`Alarm "${name}" - giờ đã qua nhưng còn trong khung → kích hoạt ngay`);
+      console.log(`Alarm "${name}" - giờ đã qua, còn trong khung → đặt ngày mai (checkImmediate đã xử lý)`);
       return;
     }
     // Ngoài khung giờ → đặt cho ngày mai
@@ -1094,11 +1203,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
         // Reset pending notifications
         Object.keys(pendingNotifications).forEach(k => pendingNotifications[k] = false);
+        saveState();
         // Đóng cửa sổ reminder nếu đang mở
-        if (reminderWindowId) {
-          try { await chrome.windows.remove(reminderWindowId); } catch (e) {}
-          reminderWindowId = null;
-        }
+        await closeAllReminderPopups();
       }
       sendResponse({ success: true });
     });
