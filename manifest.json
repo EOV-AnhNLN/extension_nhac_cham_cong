@@ -1,20 +1,27 @@
 {
     "manifest_version": 3,
     "name": "Nhắc Nhở Chấm Công",
-    "version": "1.2.1",
+    "version": "1.3.0",
     "description": "Extension nhắc nhở chấm công vào lúc 12:00 và 17:00, tự động kiểm tra trạng thái từ FastWork",
     "permissions": [
         "alarms",
         "notifications",
         "storage",
         "scripting",
-        "tabs"
+        "tabs",
+        "webRequest",
+        "declarativeNetRequestWithHostAccess"
     ],
     "host_permissions": [
-        "https://app.fastwork.vn/*"
+        "https://app.fastwork.vn/*",
+        "https://fwhrm.fastwork.vn/*"
     ],
     "background": {
         "service_worker": "background.js"
+    },
+    "options_ui": {
+        "page": "options.html",
+        "open_in_tab": true
     },
     "action": {
         "default_popup": "popup.html",
@@ -35,6 +42,7 @@
                 "https://app.fastwork.vn/timekeepingpersonal*"
             ],
             "js": [
+                "logic.js",
                 "content.js"
             ],
             "run_at": "document_idle"

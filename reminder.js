@@ -55,9 +55,27 @@ function playNotificationSound() {
         console.log('Không thể phát âm thanh:', e);
     }
 }
-playNotificationSound();
-// Lặp lại tiếng beep mỗi 5 giây
-const soundInterval = setInterval(playNotificationSound, 5000);
+
+// Lặp lại tiếng beep theo cấu hình (mặc định mỗi 5 giây)
+let soundInterval = null;
+
+function startSound(intervalSeconds) {
+    playNotificationSound();
+    soundInterval = setInterval(playNotificationSound, intervalSeconds * 1000);
+}
+
+// Áp dụng cấu hình: bật/tắt âm thanh, nhãn nút tạm hoãn
+chrome.runtime.sendMessage({ action: 'getConfig' }, (response) => {
+    const config = response && response.config;
+    if (!config) {
+        startSound(5);
+        return;
+    }
+    document.getElementById('snooze').textContent = `⏰ ${config.snoozeMinutes} phút nữa`;
+    if (config.soundEnabled) {
+        startSound(config.soundIntervalSeconds);
+    }
+});
 
 function stopSoundAndClose(action) {
     clearInterval(soundInterval);
@@ -74,6 +92,35 @@ document.getElementById('dismiss').addEventListener('click', () => {
     clearInterval(soundInterval);
     chrome.runtime.sendMessage({ action: 'dismissReminder', type: type });
     window.close();
+});
+
+// Tạm hoãn / bỏ qua hôm nay (không áp dụng cho nhắc đồng bộ)
+const skipLabels = {
+    morningIn: '🏖️ Nghỉ sáng nay',
+    noon: '🚫 Bỏ qua hôm nay',
+    afternoonIn: '🏖️ Nghỉ chiều nay',
+    evening: '🚫 Bỏ qua hôm nay'
+};
+
+if (skipLabels[type]) {
+    document.getElementById('skip').textContent = skipLabels[type];
+} else {
+    document.getElementById('extra-buttons').style.display = 'none';
+}
+
+function sendAndClose(message) {
+    clearInterval(soundInterval);
+    chrome.runtime.sendMessage(message);
+    window.close();
+}
+
+document.getElementById('snooze').addEventListener('click', () => {
+    // Số phút tạm hoãn lấy từ cấu hình ở background
+    sendAndClose({ action: 'snoozeReminder', type: type });
+});
+
+document.getElementById('skip').addEventListener('click', () => {
+    sendAndClose({ action: 'skipReminderToday', type: type });
 });
 
 window.focus();

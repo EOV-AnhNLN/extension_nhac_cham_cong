@@ -1,28 +1,5 @@
 // Content script để đọc dữ liệu chấm công từ FastWork
-
-// Hàm lấy ngày hôm nay theo định dạng DD/MM/YYYY
-function getTodayString() {
-    const today = new Date();
-    const day = today.getDate().toString().padStart(2, '0');
-    const month = (today.getMonth() + 1).toString().padStart(2, '0');
-    const year = today.getFullYear();
-    return `${day}/${month}/${year}`;
-}
-
-// Hàm parse thời gian chấm công (ví dụ: "08:08 - 12:00" hoặc "08:08 - ___")
-function parseTimekeeping(text) {
-    if (!text || text.trim() === '' || text.trim() === '-') {
-        return { checkIn: null, checkOut: null };
-    }
-
-    const parts = text.split('-').map(p => p.trim());
-    // Kiểm tra giá trị hợp lệ (không phải rỗng, không phải chỉ có dấu gạch dưới)
-    const isValid = (val) => val && val !== '' && !/^_+$/.test(val);
-    return {
-        checkIn: isValid(parts[0]) ? parts[0] : null,
-        checkOut: isValid(parts[1]) ? parts[1] : null
-    };
-}
+// getTodayString, parseTimekeeping lấy từ logic.js (inject trước file này)
 
 // Tìm index cột theo tên header (tìm trong thead)
 function findColumnIndex(headerName) {

@@ -1,3 +1,6 @@
+// Hàm thuần dùng chung (REMINDER_TYPES, getSkipReason, getBadgeState, ...)
+importScripts('logic.js');
+
 // Thời gian nhắc nhở mặc định (giờ:phút)
 const DEFAULT_REMINDERS = {
   morningIn: { hour: 8, minute: 0, enabled: true },
@@ -21,37 +24,6 @@ let reminderWindowId = null;
 // Lock để tránh tạo popup đồng thời
 let isCreatingPopup = false;
 
-// Khôi phục state từ storage khi service worker restart
-async function restoreState() {
-  try {
-    const result = await chrome.storage.local.get(['reminderWindowId', 'pendingNotifications']);
-    if (result.reminderWindowId) {
-      reminderWindowId = result.reminderWindowId;
-      // Kiểm tra window còn tồn tại không
-      try {
-        await chrome.windows.get(reminderWindowId);
-      } catch (e) {
-        reminderWindowId = null;
-        await chrome.storage.local.remove('reminderWindowId');
-      }
-    }
-    if (result.pendingNotifications) {
-      Object.assign(pendingNotifications, result.pendingNotifications);
-    }
-    console.log('[restore] reminderWindowId:', reminderWindowId, 'pending:', JSON.stringify(pendingNotifications));
-  } catch (e) {
-    console.error('[restore] Lỗi:', e);
-  }
-}
-
-// Lưu state vào storage
-async function saveState() {
-  await chrome.storage.local.set({
-    reminderWindowId,
-    pendingNotifications
-  });
-}
-
 // Lưu ID cửa sổ ẩn để fetch dữ liệu FastWork ngầm
 let hiddenFetchWindowId = null;
 
@@ -65,103 +37,75 @@ let timekeepingData = {
   lastUpdated: null
 };
 
-// Thời gian lặp lại thông báo (phút)
-const REPEAT_INTERVAL_MINUTES = 3;
+// Khôi phục state khi service worker restart
+// State tạm (popup, cửa sổ ẩn, pending) nằm ở chrome.storage.session: tự xoá khi tắt trình duyệt
+async function restoreState() {
+  try {
+    const [session, local] = await Promise.all([
+      chrome.storage.session.get(['reminderWindowId', 'pendingNotifications', 'hiddenFetchWindowId']),
+      chrome.storage.local.get(['timekeepingData'])
+    ]);
+    if (session.reminderWindowId) {
+      reminderWindowId = session.reminderWindowId;
+      // Kiểm tra window còn tồn tại không
+      try {
+        await chrome.windows.get(reminderWindowId);
+      } catch (e) {
+        reminderWindowId = null;
+      }
+    }
+    if (session.hiddenFetchWindowId) {
+      hiddenFetchWindowId = session.hiddenFetchWindowId;
+      try {
+        await chrome.windows.get(hiddenFetchWindowId);
+      } catch (e) {
+        hiddenFetchWindowId = null;
+      }
+    }
+    if (session.pendingNotifications) {
+      Object.assign(pendingNotifications, session.pendingNotifications);
+    }
+    if (local.timekeepingData) {
+      timekeepingData = local.timekeepingData;
+    }
+    // Dọn key cũ (bản trước lưu ở storage.local)
+    await chrome.storage.local.remove(['reminderWindowId', 'pendingNotifications']);
+    console.log('[restore] reminderWindowId:', reminderWindowId, 'pending:', JSON.stringify(pendingNotifications));
+  } catch (e) {
+    console.error('[restore] Lỗi:', e);
+  }
+}
 
-// Thời gian kiểm tra lại sau khi dismiss (phút)
-const RECHECK_AFTER_DISMISS_MINUTES = 1;
+// Mọi event handler phải đợi restore xong trước khi đọc state
+const stateReady = restoreState();
+
+// Lưu state vào storage
+async function saveState() {
+  await chrome.storage.session.set({
+    reminderWindowId,
+    pendingNotifications,
+    hiddenFetchWindowId
+  });
+}
+
+// Kích thước popup nhắc
+const REMINDER_POPUP_SIZE = { width: 340, height: 280 };
+const SYNC_POPUP_SIZE = { width: 340, height: 220 };
 
 // Debounce: thời gian tối thiểu giữa 2 lần hiển thị popup cùng loại (ms)
 const POPUP_DEBOUNCE_MS = 10000; // 10 giây
 let lastPopupTime = {};
 
-// Kiểm tra giá trị chấm công có hợp lệ không (không phải null/undefined/""/"_____")
-function isValidTimekeeping(val) {
-  return val && typeof val === 'string' && val.trim() !== '' && !/^_+$/.test(val.trim());
-}
-
-// Parse giờ từ chuỗi thời gian ("08:20" → 8.33, "13:23" → 13.38)
-function parseHour(timeStr) {
-  if (!isValidTimekeeping(timeStr)) return null;
-  const parts = timeStr.trim().split(':');
-  if (parts.length >= 2) {
-    return parseInt(parts[0]) + parseInt(parts[1]) / 60;
-  }
-  return null;
-}
-
-// Xác định thực tế đã chấm công gì
-// Trường hợp nghỉ sáng: session1 chứa giờ chiều (checkIn >= 12:00), session2 trống
-// Trường hợp bình thường: session1 = buổi sáng, session2 = buổi chiều
-function getEffectiveTimekeeping(data) {
-  const result = {
-    morningCheckIn: null,     // checkin sáng
-    morningCheckOut: null,    // checkout trưa
-    afternoonCheckIn: null,   // checkin chiều
-    afternoonCheckOut: null,  // checkout chiều
-    isAfternoonOnly: false    // true = nghỉ sáng, chỉ làm chiều
-  };
-
-  if (!data || !data.found) return result;
-
-  const s1In = data.session1?.checkIn;
-  const s1Out = data.session1?.checkOut;
-  const s2In = data.session2?.checkIn;
-  const s2Out = data.session2?.checkOut;
-
-  const s1InHour = parseHour(s1In);
-
-  // Nếu session1.checkIn >= 12:00 và session2 trống → nghỉ sáng, chỉ chấm chiều
-  if (s1InHour !== null && s1InHour >= 12 && !isValidTimekeeping(s2In) && !isValidTimekeeping(s2Out)) {
-    result.isAfternoonOnly = true;
-    result.morningCheckIn = 'OFF';    // Nghỉ sáng
-    result.morningCheckOut = 'OFF';   // Nghỉ sáng
-    result.afternoonCheckIn = s1In;   // Checkin chiều nằm ở session1
-    result.afternoonCheckOut = s1Out; // Checkout chiều nằm ở session1
-  } else {
-    // Trường hợp bình thường
-    result.morningCheckIn = s1In;
-    result.morningCheckOut = s1Out;
-    result.afternoonCheckIn = s2In;
-    result.afternoonCheckOut = s2Out;
-  }
-
-  return result;
-}
-
-// Kiểm tra 1 field effective đã hoàn thành chưa
-function isEffectiveDone(val) {
-  return val === 'OFF' || isValidTimekeeping(val);
-}
+// Thời gian tối đa chờ cửa sổ ẩn gửi dữ liệu về (ms)
+const HIDDEN_FETCH_WAIT_MS = 20000;
 
 // URL trang chấm công FastWork
 const FASTWORK_URL = 'https://app.fastwork.vn/timekeepingpersonal#!/';
 
-// Kiểm tra hôm nay có phải ngày OFF không (dựa vào cột "Công" từ FastWork)
-async function checkIfDayOff() {
-  const today = getTodayString();
-  const result = await chrome.storage.local.get(['timekeepingData']);
-  const data = result.timekeepingData;
-
-  if (data && data.date === today && data.workStatus !== null && data.workStatus !== undefined) {
-    const status = data.workStatus.toLowerCase().trim();
-    // "OFF" = nghỉ (từ FastWork), các giá trị số (1, 0.96, 0.98...) = đi làm
-    if (status === 'off') {
-      console.log(`[dayOff] Hôm nay ${today} là ngày OFF (workStatus="${data.workStatus}")`);
-      return true;
-    }
-    console.log(`[dayOff] Hôm nay ${today} workStatus="${data.workStatus}" → đi làm`);
-    return false;
-  }
-
-  // Chưa có dữ liệu workStatus → không biết, mặc định = đi làm (sẽ nhắc)
-  console.log(`[dayOff] Chưa có workStatus cho ${today}, mặc định đi làm`);
-  return false;
-}
-
 // Khởi tạo khi extension được cài đặt
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async () => {
   console.log('=== Extension đã được cài đặt/cập nhật ===');
+  await stateReady;
   initializeAlarms().catch(e => console.error('Lỗi initializeAlarms (onInstalled):', e));
 });
 
@@ -176,63 +120,48 @@ async function isExtensionEnabled() {
 }
 
 // Khởi tạo khi Chrome khởi động
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   console.log('=== Chrome đã khởi động ===');
+  await stateReady;
   initializeAlarms().catch(e => console.error('Lỗi initializeAlarms (onStartup):', e));
 });
 
 // Xử lý khi alarm được kích hoạt
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  console.log('Alarm triggered:', alarm.name);
+  await stateReady;
+  const name = alarm.name;
+  console.log('Alarm triggered:', name);
 
-  // Nếu extension tắt, chỉ cho phép watchdog chạy (để có thể khôi phục khi bật lại)
-  const enabled = await isExtensionEnabled();
-  if (!enabled && alarm.name !== 'watchdog') {
-    console.log(`[alarm] Extension đang tắt, bỏ qua alarm: ${alarm.name}`);
+  // Extension tắt → bỏ qua hết (watchdog vẫn còn để khôi phục khi bật lại)
+  if (!(await isExtensionEnabled())) {
+    console.log(`[alarm] Extension đang tắt, bỏ qua alarm: ${name}`);
     return;
   }
 
-  if (alarm.name === 'morningIn-reminder') {
-    console.log('[alarm] Kích hoạt morningIn-reminder');
-    await handleMorningInReminder();
-  } else if (alarm.name === 'noon-reminder') {
-    console.log('[alarm] Kích hoạt noon-reminder');
-    await handleNoonReminder();
-  } else if (alarm.name === 'afternoonIn-reminder') {
-    console.log('[alarm] Kích hoạt afternoonIn-reminder');
-    await handleAfternoonInReminder();
-  } else if (alarm.name === 'evening-reminder') {
-    console.log('[alarm] Kích hoạt evening-reminder');
-    await handleEveningReminder();
-  } else if (alarm.name === 'repeat-morningIn' && pendingNotifications.morningIn) {
-    showReminderPopup('morningIn');
-  } else if (alarm.name === 'repeat-noon' && pendingNotifications.noon) {
-    showReminderPopup('noon');
-  } else if (alarm.name === 'repeat-afternoonIn' && pendingNotifications.afternoonIn) {
-    showReminderPopup('afternoonIn');
-  } else if (alarm.name === 'repeat-evening' && pendingNotifications.evening) {
-    showReminderPopup('evening');
-  } else if (alarm.name === 'check-fastwork') {
-    await fetchTimekeepingFromFastwork();
-  } else if (alarm.name === 'check-sync') {
-    await checkSyncStatus();
-  } else if (alarm.name === 'repeat-sync' && pendingNotifications.sync) {
-    showSyncReminderPopup();
-  } else if (alarm.name === 'recheck-morningIn') {
-    await recheckAfterDismiss('morningIn');
-  } else if (alarm.name === 'recheck-noon') {
-    await recheckAfterDismiss('noon');
-  } else if (alarm.name === 'recheck-afternoonIn') {
-    await recheckAfterDismiss('afternoonIn');
-  } else if (alarm.name === 'recheck-evening') {
-    await recheckAfterDismiss('evening');
-  } else if (alarm.name === 'recheck-sync') {
-    await checkSyncStatus();
-  } else if (alarm.name === 'watchdog') {
-    // Watchdog luôn chạy, nhưng chỉ kiểm tra nếu extension bật
-    if (enabled) {
+  try {
+    if (name === 'watchdog') {
       await handleWatchdog();
+    } else if (name === 'check-fastwork') {
+      await fetchTimekeepingFromFastwork();
+    } else if (name === 'check-sync' || name === 'recheck-sync') {
+      await checkSyncStatus();
+    } else if (name === 'repeat-sync') {
+      if (pendingNotifications.sync) await showSyncReminderPopup();
+    } else {
+      const type = REMINDER_TYPES.find(t =>
+        name === `${t}-reminder` || name === `repeat-${t}` || name === `recheck-${t}`);
+      if (!type) return;
+      if (name.startsWith('repeat-')) {
+        await handleRepeat(type);
+      } else if (name.startsWith('recheck-')) {
+        await recheckAfterDismiss(type);
+      } else {
+        console.log(`[alarm] Kích hoạt ${name}`);
+        await handleDailyReminder(type);
+      }
     }
+  } catch (e) {
+    console.error(`[alarm] Lỗi khi xử lý ${name}:`, e);
   }
 });
 
@@ -241,8 +170,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 (async () => {
   console.log('=== Service worker loaded ===');
   try {
-    // Khôi phục state từ storage
-    await restoreState();
+    await stateReady;
 
     // Kiểm tra xem alarms đã có chưa
     const existingAlarms = await chrome.alarms.getAll();
@@ -256,21 +184,104 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } else {
       // Watchdog đã có → chỉ cần chạy kiểm tra ngay
       console.log('[startup] Watchdog đang chạy → kiểm tra ngay');
-      const settings = await getSettings();
-      await checkImmediateReminders(settings);
+      await resetForNewDay();
+      await checkImmediateReminders();
     }
+    await updateBadge();
   } catch (e) {
     console.error('[startup] Lỗi:', e);
   }
 })();
 
-// Kiểm tra trạng thái đồng bộ lúc 13:00
+// Cấu hình riêng của extension (trang Cài đặt nâng cao), đã gộp mặc định
+async function getConfig() {
+  const { config } = await chrome.storage.sync.get('config');
+  return normalizeConfig(config);
+}
+
+// Đọc toàn bộ dữ liệu cần để quyết định có nhắc hay không
+async function loadReminderContext() {
+  const [settings, config, local] = await Promise.all([
+    getSettings(),
+    getConfig(),
+    chrome.storage.local.get(['timekeepingData', 'reminderOverrides'])
+  ]);
+  return {
+    settings,
+    config,
+    data: local.timekeepingData,
+    overrides: local.reminderOverrides,
+    now: new Date()
+  };
+}
+
+// Toạ độ popup theo cấu hình, tính theo cửa sổ trình duyệt đang dùng
+async function getPopupBounds(size) {
+  const { popupPosition } = await getConfig();
+  try {
+    const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] });
+    const area = { left: win.left, top: win.top, width: win.width, height: win.height };
+    return { ...size, ...computePopupPosition(popupPosition, area, size) };
+  } catch (e) {
+    // Không có cửa sổ trình duyệt nào → để Chrome tự đặt vị trí
+    return { ...size };
+  }
+}
+
+// Điểm kiểm tra chung cho mọi nguồn nhắc (alarm chính, lặp lại, kiểm tra lại, watchdog):
+// extension bật, loại nhắc bật, không bỏ qua/tạm hoãn, trong khung giờ, không phải ngày OFF, chưa chấm
+async function shouldRemind(type, ctx = null) {
+  if (!(await isExtensionEnabled())) return false;
+  const context = ctx || await loadReminderContext();
+  const reason = getSkipReason(type, context);
+  if (reason) {
+    console.log(`[shouldRemind] ${type}: không nhắc (${reason})`);
+  }
+  return reason === null;
+}
+
+// Đọc/ghi bỏ qua & tạm hoãn của hôm nay
+async function updateOverrides(mutate) {
+  const { reminderOverrides } = await chrome.storage.local.get('reminderOverrides');
+  const overrides = getTodayOverrides(reminderOverrides, new Date());
+  if (mutate) {
+    mutate(overrides);
+    await chrome.storage.local.set({ reminderOverrides: overrides });
+  }
+  return overrides;
+}
+
+// Cập nhật badge trên icon extension
+async function updateBadge() {
+  try {
+    const [enabled, local] = await Promise.all([
+      isExtensionEnabled(),
+      chrome.storage.local.get(['timekeepingData'])
+    ]);
+    const badge = getBadgeState({
+      enabled,
+      pending: pendingNotifications,
+      data: local.timekeepingData,
+      now: new Date()
+    });
+    await chrome.action.setBadgeText({ text: badge.text });
+    await chrome.action.setBadgeBackgroundColor({ color: badge.color });
+    await chrome.action.setTitle({ title: badge.title });
+  } catch (e) {
+    console.log('[badge] Lỗi:', e);
+  }
+}
+
+// Kiểm tra trạng thái đồng bộ (mặc định 13:00)
 async function checkSyncStatus() {
   const now = new Date();
   const today = getTodayString();
+  const { syncCheckEnabled, syncCheckTime } = await getConfig();
+  if (!syncCheckEnabled) return;
 
-  // Chỉ kiểm tra sau 13:00
-  if (now.getHours() >= 13) {
+  // Chỉ kiểm tra sau giờ cài đặt
+  const syncMinutes = syncCheckTime.hour * 60 + syncCheckTime.minute;
+  if (now.getHours() * 60 + now.getMinutes() >= syncMinutes) {
     // Lấy dữ liệu từ storage
     const result = await chrome.storage.local.get(['timekeepingData']);
     const data = result.timekeepingData;
@@ -280,8 +291,9 @@ async function checkSyncStatus() {
       console.log('Chưa đồng bộ dữ liệu hôm nay, nhắc nhở...');
       pendingNotifications.sync = true;
       await saveState();
-      showSyncReminderPopup();
-      startRepeatAlarm('sync');
+      await showSyncReminderPopup();
+      await startRepeatAlarm('sync');
+      await updateBadge();
     } else {
       console.log('Đã có dữ liệu hôm nay:', data.date);
     }
@@ -294,15 +306,12 @@ async function showSyncReminderPopup() {
   isCreatingPopup = true;
 
   try {
-    await closeAllReminderPopups();
+    await closeReminderPopups();
 
     const popup = await chrome.windows.create({
       url: 'reminder.html?type=sync',
       type: 'popup',
-      width: 340,
-      height: 220,
-      top: 20,
-      left: 1560,
+      ...(await getPopupBounds(SYNC_POPUP_SIZE)),
       focused: true
     });
 
@@ -315,44 +324,27 @@ async function showSyncReminderPopup() {
   }
 }
 
-// Lấy ngày hôm nay dạng DD/MM/YYYY
-function getTodayString() {
-  const today = new Date();
-  const day = today.getDate().toString().padStart(2, '0');
-  const month = (today.getMonth() + 1).toString().padStart(2, '0');
-  const year = today.getFullYear();
-  return `${day}/${month}/${year}`;
-}
-
 // Reset trạng thái khi qua ngày mới
 async function resetForNewDay() {
   const today = getTodayString();
-  const result = await chrome.storage.local.get(['timekeepingData', 'lastActiveDate']);
+  const result = await chrome.storage.local.get(['lastActiveDate']);
   const lastDate = result.lastActiveDate;
 
   if (lastDate && lastDate !== today) {
     console.log(`Đã qua ngày mới (${lastDate} -> ${today}), reset trạng thái`);
 
     // Reset pending notifications
-    pendingNotifications.morningIn = false;
-    pendingNotifications.noon = false;
-    pendingNotifications.afternoonIn = false;
-    pendingNotifications.evening = false;
-    pendingNotifications.sync = false;
+    Object.keys(pendingNotifications).forEach(k => { pendingNotifications[k] = false; });
     await saveState();
 
     // Xóa các alarm recheck và repeat cũ
-    await chrome.alarms.clear('recheck-morningIn');
-    await chrome.alarms.clear('recheck-noon');
-    await chrome.alarms.clear('recheck-afternoonIn');
-    await chrome.alarms.clear('recheck-evening');
-    await chrome.alarms.clear('repeat-morningIn');
-    await chrome.alarms.clear('repeat-noon');
-    await chrome.alarms.clear('repeat-afternoonIn');
-    await chrome.alarms.clear('repeat-evening');
+    for (const type of REMINDER_TYPES) {
+      await chrome.alarms.clear(`recheck-${type}`);
+      await chrome.alarms.clear(`repeat-${type}`);
+    }
     await chrome.alarms.clear('repeat-sync');
 
-    // Reset dữ liệu chấm công
+    // Reset dữ liệu chấm công và bỏ qua/tạm hoãn của hôm qua
     timekeepingData = {
       date: null,
       found: false,
@@ -362,151 +354,96 @@ async function resetForNewDay() {
       lastUpdated: null
     };
     await chrome.storage.local.set({ timekeepingData });
+    await chrome.storage.local.remove('reminderOverrides');
 
     // Đóng popup nhắc nhở cũ nếu có
-    if (reminderWindowId) {
-      try {
-        await chrome.windows.remove(reminderWindowId);
-      } catch (e) { }
-      reminderWindowId = null;
-    }
+    await closeReminderPopups();
 
     // Đóng cửa sổ ẩn fetch nếu có
     closeHiddenFetchWindow();
 
     // Xóa notification hệ thống cũ
-    chrome.notifications.clear('morningIn-reminder');
-    chrome.notifications.clear('noon-reminder');
-    chrome.notifications.clear('afternoonIn-reminder');
-    chrome.notifications.clear('evening-reminder');
+    for (const type of REMINDER_TYPES) {
+      chrome.notifications.clear(`${type}-reminder`);
+    }
+
+    await updateBadge();
   }
 
   // Luôn cập nhật ngày hiện tại
   await chrome.storage.local.set({ lastActiveDate: today });
 }
 
-// Kiểm tra thời gian nhắc có hợp lệ cho ngày hiện tại không
-function isTimeValidForReminder(type) {
-  const now = new Date();
-  const hour = now.getHours();
-  const minute = now.getMinutes();
-
-  if (type === 'morningIn') {
-    // Chỉ nhắc checkin sáng từ 7:30 đến 9:30
-    return (hour === 7 && minute >= 30) || (hour === 8) || (hour === 9 && minute <= 30);
-  } else if (type === 'noon') {
-    // Chỉ nhắc checkout trưa từ 12:00 đến 13:30
-    return hour >= 12 && hour < 14;
-  } else if (type === 'afternoonIn') {
-    // Chỉ nhắc checkin chiều từ 12:00 đến 15:30
-    return (hour === 12 && minute >= 0) || (hour === 13) || (hour === 14) || (hour === 15 && minute <= 30);
-  } else if (type === 'evening') {
-    // Chỉ nhắc checkout chiều từ 17:00 đến 23:59
-    return hour >= 17;
-  }
-  return false;
+// Bắt đầu nhắc: hiện popup + lặp lại mỗi repeatIntervalMinutes (cấu hình)
+async function startReminder(type) {
+  pendingNotifications[type] = true;
+  await saveState();
+  await startRepeatAlarm(type);
+  await showReminderPopup(type);
+  await updateBadge();
 }
 
-// Xử lý nhắc nhở checkin sáng (8:00)
-async function handleMorningInReminder() {
-  if (pendingNotifications.morningIn) {
-    console.log('morningIn đang pending, bỏ qua');
+// Dừng hẳn nhắc (đã chấm công / ngoài khung giờ / bỏ qua) và đóng popup đang kêu
+async function stopReminder(type) {
+  console.log(`[stop] Dừng nhắc ${type}`);
+  pendingNotifications[type] = false;
+  await saveState();
+  await chrome.alarms.clear(`repeat-${type}`);
+  await chrome.alarms.clear(`recheck-${type}`);
+  chrome.notifications.clear(`${type}-reminder`);
+  await closeReminderPopups(type);
+  await updateBadge();
+}
+
+// Xử lý alarm nhắc chính hằng ngày
+async function handleDailyReminder(type) {
+  await resetForNewDay();
+  if (pendingNotifications[type]) {
+    console.log(`${type} đang pending, bỏ qua`);
     return;
   }
-  await resetForNewDay();
   await fetchTimekeepingFromFastwork();
 
-  const eff = getEffectiveTimekeeping(timekeepingData);
-  if (!isEffectiveDone(eff.morningCheckIn)) {
-    pendingNotifications.morningIn = true;
-    await saveState();
-    showReminderPopup('morningIn');
-    startRepeatAlarm('morningIn');
-  } else {
-    console.log('Đã checkin buổi sáng (hoặc nghỉ sáng), không cần nhắc');
+  if (await shouldRemind(type)) {
+    await startReminder(type);
   }
 }
 
-// Xử lý nhắc nhở checkout trưa (12:00)
-async function handleNoonReminder() {
-  if (pendingNotifications.noon) {
-    console.log('noon đang pending, bỏ qua');
+// Xử lý alarm lặp lại: kiểm tra lại điều kiện trước khi hiện popup
+async function handleRepeat(type) {
+  if (!pendingNotifications[type]) {
+    await chrome.alarms.clear(`repeat-${type}`);
     return;
   }
-  await resetForNewDay();
-  await fetchTimekeepingFromFastwork();
-
-  const eff = getEffectiveTimekeeping(timekeepingData);
-  if (!isEffectiveDone(eff.morningCheckOut)) {
-    pendingNotifications.noon = true;
-    await saveState();
-    showReminderPopup('noon');
-    startRepeatAlarm('noon');
+  if (await shouldRemind(type)) {
+    await showReminderPopup(type);
   } else {
-    console.log('Đã checkout trưa (hoặc nghỉ sáng), không cần nhắc');
+    await stopReminder(type);
   }
 }
 
-// Xử lý nhắc nhở checkin chiều (13:30)
-async function handleAfternoonInReminder() {
-  if (pendingNotifications.afternoonIn) {
-    console.log('afternoonIn đang pending, bỏ qua');
-    return;
-  }
-  await resetForNewDay();
-  await fetchTimekeepingFromFastwork();
-
-  const eff = getEffectiveTimekeeping(timekeepingData);
-  if (!isEffectiveDone(eff.afternoonCheckIn)) {
-    pendingNotifications.afternoonIn = true;
-    await saveState();
-    showReminderPopup('afternoonIn');
-    startRepeatAlarm('afternoonIn');
-  } else {
-    console.log('Đã checkin buổi chiều, không cần nhắc');
-  }
-}
-
-// Xử lý nhắc nhở checkout chiều (17:00)
-async function handleEveningReminder() {
-  if (pendingNotifications.evening) {
-    console.log('evening đang pending, bỏ qua');
-    return;
-  }
-  await resetForNewDay();
-  await fetchTimekeepingFromFastwork();
-
-  const eff = getEffectiveTimekeeping(timekeepingData);
-  if (!isEffectiveDone(eff.afternoonCheckOut)) {
-    pendingNotifications.evening = true;
-    await saveState();
-    showReminderPopup('evening');
-    startRepeatAlarm('evening');
-  } else {
-    console.log('Đã checkout buổi chiều, không cần nhắc');
-  }
-}
-
-// Tìm và đóng TẤT CẢ popup reminder đang mở (dựa vào URL)
-async function closeAllReminderPopups() {
+// Đóng popup nhắc đang mở (tìm theo URL); type = null → đóng tất cả
+async function closeReminderPopups(type = null) {
   try {
     const allWindows = await chrome.windows.getAll({ populate: true });
     for (const win of allWindows) {
-      if (win.type === 'popup' && win.tabs) {
-        for (const tab of win.tabs) {
-          if (tab.url && tab.url.includes('reminder.html')) {
-            console.log(`[popup] Đóng popup cũ (tìm theo URL): windowId=${win.id}`);
-            try {
-              await chrome.windows.remove(win.id);
-            } catch (e) { /* đã đóng */ }
-          }
-        }
-      }
+      if (win.type !== 'popup' || !win.tabs) continue;
+      const isMatch = win.tabs.some(tab => {
+        if (!tab.url || !tab.url.includes('reminder.html')) return false;
+        return !type || new URL(tab.url).searchParams.get('type') === type;
+      });
+      if (!isMatch) continue;
+
+      console.log(`[popup] Đóng popup cũ (tìm theo URL): windowId=${win.id}`);
+      try {
+        await chrome.windows.remove(win.id);
+      } catch (e) { /* đã đóng */ }
+      if (win.id === reminderWindowId) reminderWindowId = null;
     }
   } catch (e) {
     console.log('[popup] Lỗi khi tìm popup cũ:', e);
   }
-  reminderWindowId = null;
+  if (!type) reminderWindowId = null;
 }
 
 // Hiển thị popup window nhắc nhở
@@ -531,16 +468,13 @@ async function showReminderPopup(type) {
 
   try {
     // Đóng TẤT CẢ popup reminder cũ (kể cả từ service worker trước)
-    await closeAllReminderPopups();
+    await closeReminderPopups();
 
-    // Tạo popup window nhỏ gọn ở góc phải trên
+    // Tạo popup window nhỏ gọn (vị trí theo cấu hình, mặc định góc phải trên)
     const popup = await chrome.windows.create({
       url: `reminder.html?type=${type}`,
       type: 'popup',
-      width: 340,
-      height: 220,
-      top: 20,
-      left: 1560,  // Góc phải (điều chỉnh theo màn hình của bạn)
+      ...(await getPopupBounds(REMINDER_POPUP_SIZE)),
       focused: true
     });
 
@@ -588,117 +522,88 @@ function showSystemNotification(type) {
 }
 
 // Xử lý khi click vào notification hệ thống
-chrome.notifications.onClicked.addListener((notificationId) => {
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  await stateReady;
   chrome.notifications.clear(notificationId);
 
-  if (notificationId.startsWith('morningIn')) {
-    dismissReminder('morningIn');
-  } else if (notificationId.startsWith('noon')) {
-    dismissReminder('noon');
-  } else if (notificationId.startsWith('afternoonIn')) {
-    dismissReminder('afternoonIn');
-  } else if (notificationId.startsWith('evening')) {
-    dismissReminder('evening');
-  }
+  const type = REMINDER_TYPES.find(t => notificationId.startsWith(t));
+  if (type) await dismissReminder(type);
 
   chrome.tabs.create({ url: FASTWORK_URL });
 });
 
 // Xử lý khi đóng notification
-chrome.notifications.onClosed.addListener((notificationId, byUser) => {
-  if (byUser) {
-    if (notificationId.startsWith('morningIn')) {
-      dismissReminder('morningIn');
-    } else if (notificationId.startsWith('noon')) {
-      dismissReminder('noon');
-    } else if (notificationId.startsWith('afternoonIn')) {
-      dismissReminder('afternoonIn');
-    } else if (notificationId.startsWith('evening')) {
-      dismissReminder('evening');
-    }
-  }
+chrome.notifications.onClosed.addListener(async (notificationId, byUser) => {
+  if (!byUser) return;
+  await stateReady;
+  const type = REMINDER_TYPES.find(t => notificationId.startsWith(t));
+  if (type) await dismissReminder(type);
 });
 
 // Dọn dẹp khi cửa sổ bị đóng
 chrome.windows.onRemoved.addListener(async (windowId) => {
+  await stateReady;
   if (windowId === reminderWindowId) {
     reminderWindowId = null;
-    await chrome.storage.local.remove('reminderWindowId');
+    await saveState();
   }
   if (windowId === hiddenFetchWindowId) {
     hiddenFetchWindowId = null;
+    await saveState();
   }
 });
 
-// Dismiss reminder và dừng lặp, nhưng đặt alarm kiểm tra lại
-async function dismissReminder(type) {
+// Tạm hoãn nhắc `minutes` phút, hết hạn thì kiểm tra lại
+async function snoozeReminder(type, minutes) {
   pendingNotifications[type] = false;
   await saveState();
-  chrome.alarms.clear(`repeat-${type}`);
+  await chrome.alarms.clear(`repeat-${type}`);
   chrome.notifications.clear(`${type}-reminder`);
 
-  // Đặt alarm kiểm tra lại sau 5 phút để xem đã chấm công thật chưa
-  chrome.alarms.create(`recheck-${type}`, {
-    delayInMinutes: RECHECK_AFTER_DISMISS_MINUTES
-  });
-  console.log(`Đã dismiss reminder ${type}, sẽ kiểm tra lại sau ${RECHECK_AFTER_DISMISS_MINUTES} phút`);
+  if (type !== 'sync') {
+    await updateOverrides(o => { o.snoozeUntil[type] = Date.now() + minutes * 60 * 1000; });
+  }
+  chrome.alarms.create(`recheck-${type}`, { delayInMinutes: minutes });
+  console.log(`Tạm hoãn ${type}, sẽ kiểm tra lại sau ${minutes} phút`);
+  await updateBadge();
 }
 
-// Kiểm tra lại sau khi dismiss - nếu chưa chấm công thì nhắc lại
+// Dismiss reminder (nút OK) = tạm hoãn ngắn để kiểm tra xem đã chấm công thật chưa
+async function dismissReminder(type) {
+  const { recheckAfterDismissMinutes } = await getConfig();
+  await snoozeReminder(type, recheckAfterDismissMinutes);
+}
+
+// Bỏ qua nhắc hôm nay (nghỉ sáng → bỏ cả checkout trưa, nghỉ chiều → bỏ cả checkout chiều)
+async function skipReminderToday(type) {
+  const types = SKIP_GROUPS[type] || [type];
+  await updateOverrides(o => { types.forEach(t => { o.skip[t] = true; }); });
+  for (const t of types) {
+    await stopReminder(t);
+  }
+  console.log(`Bỏ qua hôm nay: ${types.join(', ')}`);
+}
+
+// Kiểm tra lại sau khi dismiss/tạm hoãn - nếu chưa chấm công thì nhắc lại
 async function recheckAfterDismiss(type) {
   console.log(`Đang kiểm tra lại chấm công ${type}...`);
 
   // Reset trạng thái nếu đã qua ngày mới
   await resetForNewDay();
 
-  // Kiểm tra thời gian có hợp lệ cho loại nhắc nhở này không
-  if (!isTimeValidForReminder(type)) {
-    console.log(`Đã quá giờ nhắc ${type} cho ngày hiện tại, bỏ qua`);
-    pendingNotifications[type] = false;
-    return;
-  }
+  // Hết thời gian tạm hoãn
+  await updateOverrides(o => { delete o.snoozeUntil[type]; });
+
+  if (pendingNotifications[type]) return;
 
   // Lấy dữ liệu mới nhất từ FastWork
   await fetchTimekeepingFromFastwork();
 
-  // Đọc từ storage để đảm bảo có dữ liệu mới nhất
-  const result = await chrome.storage.local.get(['timekeepingData']);
-  const data = result.timekeepingData || timekeepingData;
-  const today = getTodayString();
-
-  console.log('Dữ liệu kiểm tra:', data);
-
-  // Mặc định là cần nhắc lại (nếu không có dữ liệu thì vẫn nhắc)
-  let needReminder = true;
-
-  if (data && data.found) {
-    // Chỉ dùng dữ liệu nếu đúng ngày hôm nay
-    if (data.date === today) {
-      const eff = getEffectiveTimekeeping(data);
-      if (type === 'morningIn') {
-        needReminder = !isEffectiveDone(eff.morningCheckIn);
-      } else if (type === 'noon') {
-        needReminder = !isEffectiveDone(eff.morningCheckOut);
-      } else if (type === 'afternoonIn') {
-        needReminder = !isEffectiveDone(eff.afternoonCheckIn);
-      } else if (type === 'evening') {
-        needReminder = !isEffectiveDone(eff.afternoonCheckOut);
-      }
-    } else {
-      // Dữ liệu cũ ngày khác, không tin cậy → nhắc nếu còn trong khung giờ
-      console.log(`Dữ liệu chấm công là ngày ${data.date}, không phải hôm nay ${today}`);
-      needReminder = isTimeValidForReminder(type);
-    }
-  }
-
-  if (needReminder) {
+  if (await shouldRemind(type)) {
     console.log(`Chưa chấm công ${type}, nhắc lại!`);
-    pendingNotifications[type] = true;
-    await saveState();
-    showReminderPopup(type);
-    startRepeatAlarm(type);
+    await startReminder(type);
   } else {
-    console.log(`Đã chấm công ${type} rồi, không cần nhắc nữa`);
+    console.log(`Không cần nhắc ${type} nữa`);
   }
 }
 
@@ -755,9 +660,219 @@ async function ensureTimekeepingUrl(tabId) {
   }
 }
 
-// Lấy dữ liệu chấm công từ FastWork
-async function fetchTimekeepingFromFastwork() {
+// Các lời gọi đang chờ dữ liệu từ content script (cửa sổ ẩn)
+const dataWaiters = [];
+
+// Đợi tới khi 1 waiter trong `waiters` được gọi (true) hoặc hết thời gian (false)
+function waitFor(waiters, timeoutMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      const index = waiters.indexOf(done);
+      if (index >= 0) waiters.splice(index, 1);
+      resolve(false);
+    }, timeoutMs);
+    function done() {
+      clearTimeout(timer);
+      resolve(true);
+    }
+    waiters.push(done);
+  });
+}
+
+// Đợi content script gửi dữ liệu về (true) hoặc hết thời gian (false)
+function waitForTimekeepingData(timeoutMs = HIDDEN_FETCH_WAIT_MS) {
+  return waitFor(dataWaiters, timeoutMs);
+}
+
+// Tạo cửa sổ ẩn và đợi dữ liệu về
+async function fetchViaHiddenWindow() {
+  if (await createHiddenFetchWindow()) {
+    await waitForTimekeepingData();
+  }
+}
+
+// Request API chấm công mà trang FastWork gọi
+const TIMESHEET_API_PATTERN = 'https://fwhrm.fastwork.vn/TimesheetMobile/*';
+
+// Header trình duyệt tự gắn → không gửi lại qua fetch (cookie do fetch tự gửi, Origin/Referer đặt bằng DNR)
+const BROWSER_MANAGED_HEADER_RE = /^(host|connection|content-length|cookie|origin|referer|user-agent|accept-encoding|accept-language|pragma|cache-control|priority|dnt|upgrade-insecure-requests|if-none-match|if-modified-since|sec-[\w-]+)$/i;
+
+// Origin trang FastWork (dùng khi chưa học được từ request thật)
+const DEFAULT_PAGE_ORIGIN = 'https://app.fastwork.vn';
+
+// ID rule declarativeNetRequest gắn Origin/Referer cho request API của extension
+const API_HEADER_RULE_ID = 1;
+
+// Thời gian chờ tối đa khi gọi API (ms)
+const API_TIMEOUT_MS = 10000;
+
+// Các lời gọi đang chờ học được cấu hình API
+const apiConfigWaiters = [];
+
+// Học URL (companyId, email) + header xác thực từ request thật của trang FastWork
+chrome.webRequest.onSendHeaders.addListener(async (details) => {
+  // Bỏ qua request của chính extension và preflight CORS
+  if (details.method !== 'GET') return;
+  if (details.initiator && details.initiator.startsWith('chrome-extension://')) return;
+
+  const config = parseTimesheetUrl(details.url);
+  if (!config) return;
+
+  const requestHeaders = details.requestHeaders || [];
+  const headers = {};
+  let pageOrigin = details.initiator || null;
+  let pageReferer = null;
+  for (const { name, value } of requestHeaders) {
+    const lower = name.toLowerCase();
+    if (lower === 'origin') {
+      pageOrigin = value;
+    } else if (lower === 'referer') {
+      pageReferer = value;
+    } else if (value && !BROWSER_MANAGED_HEADER_RE.test(name)) {
+      headers[name] = value;
+    }
+  }
+  await Promise.all([
+    chrome.storage.local.set({ fastworkApi: { ...config, pageOrigin, pageReferer } }),
+    // Giá trị header (có thể chứa token) chỉ giữ trong bộ nhớ phiên (xoá khi tắt trình duyệt)
+    chrome.storage.session.set({
+      fastworkApiHeaders: headers,
+      fastworkApiPageHeaderNames: requestHeaders.map(h => h.name.toLowerCase())
+    })
+  ]);
+  console.log('[api] Đã học cấu hình API:', config, 'origin:', pageOrigin, 'headers:', Object.keys(headers));
+  apiConfigWaiters.splice(0).forEach(resolve => resolve());
+}, { urls: [TIMESHEET_API_PATTERN] }, ['requestHeaders', 'extraHeaders']);
+
+// fetch() từ service worker không gửi Origin/Referer → server FastWork trả 403 "Access denied"
+// Rule DNR gắn 2 header như trang FastWork, chỉ cho request ngoài tab (của extension) tới API
+async function ensureApiHeaderRule(api) {
+  const pageOrigin = api.pageOrigin || DEFAULT_PAGE_ORIGIN;
+  const pageReferer = api.pageReferer || `${pageOrigin}/`;
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [API_HEADER_RULE_ID],
+    addRules: [{
+      id: API_HEADER_RULE_ID,
+      priority: 1,
+      action: {
+        type: 'modifyHeaders',
+        requestHeaders: [
+          { header: 'origin', operation: 'set', value: pageOrigin },
+          { header: 'referer', operation: 'set', value: pageReferer }
+        ]
+      },
+      condition: {
+        urlFilter: `|${api.origin}/TimesheetMobile/`,
+        tabIds: [chrome.tabs.TAB_ID_NONE],
+        resourceTypes: ['xmlhttprequest']
+      }
+    }]
+  });
+}
+
+// Mở ngầm trang chấm công để trang tự gọi API → webRequest học cấu hình
+async function learnApiConfig() {
+  const learned = waitFor(apiConfigWaiters, HIDDEN_FETCH_WAIT_MS);
+  if (!(await createHiddenFetchWindow())) return false;
+  const success = await learned;
+  // Học xong thì không cần cửa sổ nữa (lần sau gọi API trực tiếp)
+  closeHiddenFetchWindow();
+  return success;
+}
+
+// Cắt ngắn nội dung response để hiển thị khi lỗi
+function snippet(text, max = 200) {
+  const oneLine = String(text || '').replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+// Gọi API JSON chấm công → { data } hoặc { error } (lý do lỗi để hiển thị/ghi log)
+async function requestTimesheetApi() {
+  const [{ fastworkApi }, { fastworkApiHeaders }] = await Promise.all([
+    chrome.storage.local.get('fastworkApi'),
+    chrome.storage.session.get('fastworkApiHeaders')
+  ]);
+  if (!fastworkApi) {
+    return { error: 'Chưa có cấu hình API (cần mở trang chấm công FastWork 1 lần)' };
+  }
+
+  const now = new Date();
+  const url = buildTimesheetUrl(fastworkApi, now);
+  let res;
+  let text;
   try {
+    await ensureApiHeaderRule(fastworkApi);
+  } catch (e) {
+    console.log('[api] Không đặt được rule Origin/Referer:', e);
+  }
+  try {
+    res = await fetch(url, {
+      credentials: 'include',
+      headers: fastworkApiHeaders || {},
+      signal: AbortSignal.timeout(API_TIMEOUT_MS)
+    });
+    text = await res.text();
+  } catch (e) {
+    return { error: `Lỗi mạng: ${e.message}`, url };
+  }
+
+  if (!res.ok) {
+    // Hết phiên → bỏ header cũ, lần mở trang FastWork sau sẽ học lại
+    if (res.status === 401 || res.status === 403) {
+      await chrome.storage.session.remove('fastworkApiHeaders');
+    }
+    return { error: `HTTP ${res.status}: ${snippet(text)}`, url };
+  }
+
+  // Không dựa vào content-type: có server trả JSON với text/html hoặc text/plain
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    const contentType = res.headers.get('content-type') || '?';
+    return { error: `Response không phải JSON (${contentType}), có thể bị chuyển về trang đăng nhập: ${snippet(text)}`, url };
+  }
+
+  const data = parseTimesheetResponse(json, fastworkApi.email, now);
+  if (!data) {
+    const shape = json && typeof json === 'object' ? `keys: ${Object.keys(json).join(', ')}` : typeof json;
+    return { error: `Response sai format (không có mảng "result"), ${shape}: ${snippet(text)}`, url };
+  }
+  return { data: { ...data, source: 'api' }, url };
+}
+
+// Gọi API JSON chấm công; null = chưa có cấu hình / lỗi → fallback đọc trang
+async function fetchTimekeepingViaApi() {
+  const { data, error, url } = await requestTimesheetApi();
+  if (error) {
+    console.log('[api] Không lấy được dữ liệu qua API:', error, url || '');
+    return null;
+  }
+  console.log('[api] Lấy dữ liệu qua API thành công');
+  return data;
+}
+
+// Fetch đang chạy (gộp các lời gọi trùng nhau để không mở nhiều cửa sổ ẩn)
+let fetchInFlight = null;
+
+// Lấy dữ liệu chấm công từ FastWork
+function fetchTimekeepingFromFastwork() {
+  if (!fetchInFlight) {
+    fetchInFlight = doFetchTimekeeping().finally(() => { fetchInFlight = null; });
+  }
+  return fetchInFlight;
+}
+
+async function doFetchTimekeeping() {
+  try {
+    // 0. Ưu tiên gọi API JSON (không cần mở/reload tab)
+    const { useApi } = await getConfig();
+    const apiData = useApi ? await fetchTimekeepingViaApi() : null;
+    if (apiData) {
+      await onTimekeepingData(apiData);
+      return;
+    }
+
     // 1. Thử lấy từ tab FastWork đang mở (không phải cửa sổ ẩn)
     const allTabs = await chrome.tabs.query({ url: 'https://app.fastwork.vn/*' });
     const visibleTabs = allTabs.filter(t => !hiddenFetchWindowId || t.windowId !== hiddenFetchWindowId);
@@ -782,7 +897,7 @@ async function fetchTimekeepingFromFastwork() {
               if (loaded) {
                 const response = await getDataFromTab(hiddenTabs[0].id);
                 if (response) {
-                  await handleTimekeepingResponse(response);
+                  await onTimekeepingData(response);
                   return;
                 }
               }
@@ -792,7 +907,7 @@ async function fetchTimekeepingFromFastwork() {
           }
         }
         // Tạo cửa sổ ẩn mới
-        await createHiddenFetchWindow();
+        await fetchViaHiddenWindow();
         return;
       }
 
@@ -803,7 +918,7 @@ async function fetchTimekeepingFromFastwork() {
       if (loaded) {
         const response = await getDataFromTab(tab.id);
         if (response) {
-          await handleTimekeepingResponse(response);
+          await onTimekeepingData(response);
           return;
         }
       }
@@ -819,7 +934,7 @@ async function fetchTimekeepingFromFastwork() {
           if (loaded) {
             const response = await getDataFromTab(tab.id);
             if (response) {
-              await handleTimekeepingResponse(response);
+              await onTimekeepingData(response);
               return;
             }
           }
@@ -831,51 +946,76 @@ async function fetchTimekeepingFromFastwork() {
     }
 
     // 3. Không có tab nào → tạo cửa sổ ẩn (minimized) để fetch
-    await createHiddenFetchWindow();
+    await fetchViaHiddenWindow();
 
   } catch (error) {
     console.log('Lỗi khi lấy dữ liệu:', error);
   }
 }
 
-// Xử lý khi nhận được dữ liệu chấm công
-async function handleTimekeepingResponse(response) {
+// Nhận dữ liệu chấm công mới (từ fetch hoặc content script)
+async function onTimekeepingData(data) {
+  // Không ghi đè dữ liệu tốt của hôm nay bằng lần đọc lỗi (bảng chưa render xong)
+  if (!data.found) {
+    const { timekeepingData: stored } = await chrome.storage.local.get('timekeepingData');
+    if (isTodayData(stored, new Date())) return;
+  }
+
   timekeepingData = {
-    ...response,
+    ...data,
     lastUpdated: new Date().toISOString()
   };
   await chrome.storage.local.set({ timekeepingData });
   console.log('Đã cập nhật dữ liệu chấm công:', timekeepingData);
 
-  // Đóng cửa sổ ẩn nếu đã nhận dữ liệu
-  closeHiddenFetchWindow();
+  if (data.found) {
+    // Đóng cửa sổ ẩn nếu đã nhận dữ liệu
+    closeHiddenFetchWindow();
+    dataWaiters.splice(0).forEach(resolve => resolve());
+  }
+
+  // Dừng các nhắc nhở không còn cần (đã chấm công / ngày OFF / ...)
+  const ctx = await loadReminderContext();
+  for (const type of REMINDER_TYPES) {
+    if (pendingNotifications[type] && !(await shouldRemind(type, ctx))) {
+      await stopReminder(type);
+    }
+  }
+  if (pendingNotifications.sync && isTodayData(timekeepingData, ctx.now)) {
+    await stopReminder('sync');
+  }
 
   // Cập nhật tần suất polling
   await updatePollingFrequency();
+  await updateBadge();
 }
 
 // Tạo cửa sổ ẩn (minimized) để load FastWork ngầm
 async function createHiddenFetchWindow() {
+  // Đóng cửa sổ ẩn cũ để không bị mồ côi khi ghi đè ID
+  closeHiddenFetchWindow();
   try {
     console.log('Tạo cửa sổ ẩn để fetch dữ liệu FastWork...');
+    // Không truyền width/height: Chrome báo "Invalid value for state" khi kết hợp với 'minimized'
     const win = await chrome.windows.create({
       url: FASTWORK_URL,
       type: 'popup',
       state: 'minimized',
-      focused: false,
-      width: 800,
-      height: 600
+      focused: false
     });
     hiddenFetchWindowId = win.id;
+    await saveState();
     console.log('Đã tạo cửa sổ ẩn:', win.id);
 
     // Tự động đóng sau 60 giây để tránh zombie window
     setTimeout(() => {
-      closeHiddenFetchWindow();
+      if (hiddenFetchWindowId === win.id) closeHiddenFetchWindow();
     }, 60000);
+    return true;
   } catch (e) {
     console.log('Không thể tạo cửa sổ ẩn:', e);
     hiddenFetchWindowId = null;
+    return false;
   }
 }
 
@@ -885,71 +1025,41 @@ function closeHiddenFetchWindow() {
     console.log('Đóng cửa sổ ẩn:', hiddenFetchWindowId);
     chrome.windows.remove(hiddenFetchWindowId).catch(() => {});
     hiddenFetchWindowId = null;
+    saveState();
   }
 }
 
-// Cập nhật tần suất polling dựa trên trạng thái chấm công
+// Cập nhật tần suất polling: nhanh khi đang có loại nhắc tới hạn mà chưa chấm công
 async function updatePollingFrequency() {
-  const now = new Date();
-  const hour = now.getHours();
-  const day = now.getDay(); // 0=CN, 6=T7
-
-  // Giảm tần suất ngày OFF
-  const isDayOff = await checkIfDayOff();
-  if (isDayOff) {
-    await chrome.alarms.clear('check-fastwork');
-    chrome.alarms.create('check-fastwork', {
-      delayInMinutes: 60,
-      periodInMinutes: 60
-    });
-    console.log('Polling ngày OFF: mỗi 60 phút');
-    return;
-  }
-
-  const result = await chrome.storage.local.get(['timekeepingData']);
-  const data = result.timekeepingData;
-  const today = getTodayString();
-  const hasData = data && data.date === today && data.found;
-  const eff = hasData ? getEffectiveTimekeeping(data) : null;
-
-  let needFrequentPoll = false;
-
-  if (hour >= 7 && hour < 10) {
-    // Gần giờ sáng - kiểm tra checkin buổi sáng
-    needFrequentPoll = !eff || !isEffectiveDone(eff.morningCheckIn);
-  } else if (hour >= 12 && hour < 14) {
-    // Gần giờ trưa - kiểm tra checkout buổi sáng
-    needFrequentPoll = !eff || !isEffectiveDone(eff.morningCheckOut);
-  } else if (hour >= 12 && hour < 15) {
-    // Gần giờ chiều - kiểm tra checkin buổi chiều
-    needFrequentPoll = !eff || !isEffectiveDone(eff.afternoonCheckIn);
-  } else if (hour >= 17) {
-    // Gần giờ về - kiểm tra checkout buổi chiều
-    needFrequentPoll = !eff || !isEffectiveDone(eff.afternoonCheckOut);
-  }
-
   await chrome.alarms.clear('check-fastwork');
+  if (!(await isExtensionEnabled())) return;
 
-  if (needFrequentPoll) {
+  // Cùng điều kiện với shouldRemind (đã tính ngày OFF, khung giờ theo cài đặt, bỏ qua/tạm hoãn)
+  const ctx = await loadReminderContext();
+  const dueTypes = REMINDER_TYPES.filter(type => getSkipReason(type, ctx) === null);
+
+  const { fastPollSeconds, slowPollMinutes } = ctx.config;
+  if (dueTypes.length > 0) {
     chrome.alarms.create('check-fastwork', {
-      delayInMinutes: 0.5,
-      periodInMinutes: 0.5  // 30 giây
+      delayInMinutes: fastPollSeconds / 60,
+      periodInMinutes: fastPollSeconds / 60
     });
-    console.log('Polling nhanh: mỗi 30 giây (chưa chấm công)');
+    console.log(`Polling nhanh: mỗi ${fastPollSeconds} giây (chưa chấm: ${dueTypes.join(', ')})`);
   } else {
     chrome.alarms.create('check-fastwork', {
-      delayInMinutes: 60,
-      periodInMinutes: 60
+      delayInMinutes: slowPollMinutes,
+      periodInMinutes: slowPollMinutes
     });
-    console.log('Polling bình thường: mỗi 60 phút');
+    console.log(`Polling bình thường: mỗi ${slowPollMinutes} phút`);
   }
 }
 
 // Bắt đầu alarm lặp lại
-function startRepeatAlarm(type) {
+async function startRepeatAlarm(type) {
+  const { repeatIntervalMinutes } = await getConfig();
   chrome.alarms.create(`repeat-${type}`, {
-    delayInMinutes: REPEAT_INTERVAL_MINUTES,
-    periodInMinutes: REPEAT_INTERVAL_MINUTES
+    delayInMinutes: repeatIntervalMinutes,
+    periodInMinutes: repeatIntervalMinutes
   });
 }
 
@@ -977,38 +1087,33 @@ async function initializeAlarms() {
         periodInMinutes: 5
       });
     }
+    await updateBadge();
     return;
   }
 
-  const settings = await getSettings();
+  const [settings, config] = await Promise.all([getSettings(), getConfig()]);
 
   // Xóa tất cả alarm cũ (bao gồm cả repeat và recheck)
+  // Loại nào còn pending sẽ được checkImmediateReminders tạo lại alarm lặp
   const allAlarms = await chrome.alarms.getAll();
   for (const alarm of allAlarms) {
     await chrome.alarms.clear(alarm.name);
   }
 
-  if (settings.morningIn && settings.morningIn.enabled) {
-    createDailyAlarm('morningIn-reminder', settings.morningIn.hour, settings.morningIn.minute);
+  for (const type of REMINDER_TYPES) {
+    const setting = settings[type];
+    if (setting && setting.enabled) {
+      createDailyAlarm(`${type}-reminder`, setting.hour, setting.minute);
+    }
   }
 
-  if (settings.noon.enabled) {
-    createDailyAlarm('noon-reminder', settings.noon.hour, settings.noon.minute);
-  }
-
-  if (settings.afternoonIn && settings.afternoonIn.enabled) {
-    createDailyAlarm('afternoonIn-reminder', settings.afternoonIn.hour, settings.afternoonIn.minute);
-  }
-
-  if (settings.evening.enabled) {
-    createDailyAlarm('evening-reminder', settings.evening.hour, settings.evening.minute);
-  }
-
-  // Polling thông minh: 30s khi chưa chấm công, 30p khi đã chấm
+  // Polling thông minh: nhanh khi chưa chấm công, chậm khi đã chấm (theo cấu hình)
   await updatePollingFrequency();
 
-  // Tạo alarm kiểm tra đồng bộ lúc 13:00
-  createDailyAlarm('check-sync', 13, 0);
+  // Tạo alarm kiểm tra đồng bộ (mặc định 13:00)
+  if (config.syncCheckEnabled) {
+    createDailyAlarm('check-sync', config.syncCheckTime.hour, config.syncCheckTime.minute);
+  }
 
   // Watchdog: kiểm tra nhắc nhở mỗi 5 phút (backup cho trường hợp alarm chính bị miss)
   // Chrome MV3 minimum period = 1 phút
@@ -1021,79 +1126,35 @@ async function initializeAlarms() {
 
   // Kiểm tra ngay: nếu đang trong khung giờ nhắc mà chưa chấm công → nhắc luôn
   try {
-    await checkImmediateReminders(settings);
+    await checkImmediateReminders();
   } catch (e) {
     console.error('Lỗi checkImmediateReminders trong initializeAlarms:', e);
   }
+  await updateBadge();
 }
 
 // Kiểm tra và nhắc ngay nếu đang trong khung giờ mà chưa chấm công
-async function checkImmediateReminders(settings) {
-  const now = new Date();
-  const today = getTodayString();
-  console.log(`[checkImmediate] ====== Bắt đầu kiểm tra lúc ${now.toLocaleTimeString()} (${today}) ======`);
-
-  // Kiểm tra ngày OFF (dựa vào cột "Công" từ FastWork thay vì hardcode T7/CN)
-  const isDayOff = await checkIfDayOff();
-  if (isDayOff) {
-    console.log('[checkImmediate] Ngày OFF, bỏ qua');
-    return;
-  }
-
+async function checkImmediateReminders() {
   // Đọc từ storage (nhanh, không cần fetch)
-  const result = await chrome.storage.local.get(['timekeepingData']);
-  const data = result.timekeepingData;
-
-  console.log('[checkImmediate] Data từ storage:', JSON.stringify(data));
+  const ctx = await loadReminderContext();
+  console.log(`[checkImmediate] ====== Bắt đầu kiểm tra lúc ${ctx.now.toLocaleTimeString()} (${getTodayString(ctx.now)}) ======`);
   console.log('[checkImmediate] pendingNotifications:', JSON.stringify(pendingNotifications));
 
-  const hasData = data && data.date === today && data.found;
+  for (const type of REMINDER_TYPES) {
+    if (pendingNotifications[type]) {
+      // Đang nhắc: đảm bảo còn alarm lặp (có thể bị xoá khi khởi tạo lại alarms)
+      if (!(await chrome.alarms.get(`repeat-${type}`))) {
+        console.log(`[checkImmediate] ${type} pending nhưng mất alarm lặp → tạo lại`);
+        await startRepeatAlarm(type);
+      }
+      continue;
+    }
 
-  // Danh sách kiểm tra với effective mapping (xử lý cả case nghỉ sáng)
-  const eff = hasData ? getEffectiveTimekeeping(data) : null;
-  const checks = [
-    { type: 'morningIn', setting: settings?.morningIn, effectiveValue: eff?.morningCheckIn },
-    { type: 'noon', setting: settings?.noon, effectiveValue: eff?.morningCheckOut },
-    { type: 'afternoonIn', setting: settings?.afternoonIn, effectiveValue: eff?.afternoonCheckIn },
-    { type: 'evening', setting: settings?.evening, effectiveValue: eff?.afternoonCheckOut }
-  ];
-
-  if (eff) {
-    console.log(`[checkImmediate] Effective: afternoonOnly=${eff.isAfternoonOnly}, morningIn=${eff.morningCheckIn}, morningOut=${eff.morningCheckOut}, afternoonIn=${eff.afternoonCheckIn}, afternoonOut=${eff.afternoonCheckOut}`);
-  }
-
-  for (const check of checks) {
-    const enabled = check.setting?.enabled;
-    const inTimeWindow = isTimeValidForReminder(check.type);
-    const pending = pendingNotifications[check.type];
-    const alreadyDone = hasData && isEffectiveDone(check.effectiveValue);
-
-    console.log(`[checkImmediate] ${check.type}: enabled=${enabled}, inTimeWindow=${inTimeWindow}, pending=${pending}, hasData=${hasData}, alreadyDone=${alreadyDone}`);
-
-    if (!enabled) continue;
-    if (!inTimeWindow) continue;
-    if (pending) continue;  // Đang nhắc rồi
-    if (alreadyDone) continue;  // Đã chấm công rồi
+    if (!(await shouldRemind(type, ctx))) continue;
 
     // CẦN NHẮC → hiển thị ngay, KHÔNG đợi fetch
-    console.log(`[checkImmediate] >>> NHẮC NGAY: ${check.type} <<<`);
-    pendingNotifications[check.type] = true;
-    await saveState();
-
-    try {
-      await showReminderPopup(check.type);
-      console.log(`[checkImmediate] Popup ${check.type} đã hiển thị thành công`);
-    } catch (e) {
-      console.error(`[checkImmediate] Lỗi hiển thị popup ${check.type}:`, e);
-      // Fallback: notification hệ thống
-      try {
-        showSystemNotification(check.type);
-        console.log(`[checkImmediate] Fallback notification ${check.type} đã gửi`);
-      } catch (e2) {
-        console.error(`[checkImmediate] Cả fallback cũng lỗi:`, e2);
-      }
-    }
-    startRepeatAlarm(check.type);
+    console.log(`[checkImmediate] >>> NHẮC NGAY: ${type} <<<`);
+    await startReminder(type);
 
     // Fetch dữ liệu mới nhất ở background (không block)
     fetchTimekeepingFromFastwork().catch(e => console.log('[checkImmediate] Fetch background lỗi:', e));
@@ -1111,9 +1172,7 @@ async function handleWatchdog() {
 
   try {
     await resetForNewDay();
-    const settings = await getSettings();
-    console.log('[watchdog] Settings:', JSON.stringify(settings));
-    await checkImmediateReminders(settings);
+    await checkImmediateReminders();
   } catch (e) {
     console.error('[watchdog] Lỗi:', e);
   }
@@ -1122,37 +1181,21 @@ async function handleWatchdog() {
 // Tạo alarm hàng ngày
 function createDailyAlarm(name, hour, minute) {
   const now = new Date();
-  let alarmTime = new Date();
-
+  const alarmTime = new Date();
   alarmTime.setHours(hour, minute, 0, 0);
 
+  // Giờ đã qua → đặt ngày mai (khung giờ hiện tại do checkImmediateReminders xử lý,
+  // tránh race condition tạo popup trùng)
   if (alarmTime <= now) {
-    // Giờ đã qua → kiểm tra nếu vẫn trong khung giờ hợp lệ thì kích hoạt ngay (1 phút)
-    const type = name.replace('-reminder', '');
-    if (isTimeValidForReminder(type)) {
-      // Không cần kích hoạt ngay vì checkImmediateReminders() đã xử lý
-      // Đặt cho ngày mai để tránh race condition tạo popup trùng
-      alarmTime.setDate(alarmTime.getDate() + 1);
-      const delayTomorrow = (alarmTime.getTime() - now.getTime()) / (1000 * 60);
-      chrome.alarms.create(name, {
-        delayInMinutes: delayTomorrow,
-        periodInMinutes: 24 * 60
-      });
-      console.log(`Alarm "${name}" - giờ đã qua, còn trong khung → đặt ngày mai (checkImmediate đã xử lý)`);
-      return;
-    }
-    // Ngoài khung giờ → đặt cho ngày mai
     alarmTime.setDate(alarmTime.getDate() + 1);
   }
 
-  const delayInMinutes = (alarmTime.getTime() - now.getTime()) / (1000 * 60);
-
   chrome.alarms.create(name, {
-    delayInMinutes: delayInMinutes,
+    when: alarmTime.getTime(),
     periodInMinutes: 24 * 60
   });
 
-  console.log(`Alarm "${name}" được đặt lúc ${hour}:${minute.toString().padStart(2, '0')}`);
+  console.log(`Alarm "${name}" được đặt lúc ${alarmTime.toLocaleString()}`);
 }
 
 // Lấy cài đặt từ storage
@@ -1178,123 +1221,162 @@ async function saveSettings(settings) {
   });
 }
 
+// Bật/tắt toàn bộ extension
+async function setExtensionEnabled(enabled) {
+  await chrome.storage.sync.set({ extensionEnabled: enabled });
+  if (enabled) {
+    console.log('[toggle] Extension BẬT - khởi tạo lại alarms');
+    await initializeAlarms();
+  } else {
+    console.log('[toggle] Extension TẮT - xóa alarms và dừng thông báo');
+    // Xóa tất cả alarms trừ watchdog
+    const allAlarms = await chrome.alarms.getAll();
+    for (const alarm of allAlarms) {
+      if (alarm.name !== 'watchdog') {
+        await chrome.alarms.clear(alarm.name);
+      }
+    }
+    // Reset pending notifications
+    Object.keys(pendingNotifications).forEach(k => { pendingNotifications[k] = false; });
+    await saveState();
+    // Đóng cửa sổ reminder nếu đang mở
+    await closeReminderPopups();
+  }
+  await updateBadge();
+}
+
+// Xử lý message từ popup / reminder / content script
+async function handleMessage(request) {
+  await stateReady;
+
+  switch (request.action) {
+    case 'getExtensionEnabled':
+      return { enabled: await isExtensionEnabled() };
+
+    case 'setExtensionEnabled':
+      await setExtensionEnabled(request.enabled);
+      return { success: true };
+
+    case 'getSettings':
+      return { settings: await getSettings() };
+
+    case 'saveSettings':
+      await saveSettings(request.settings);
+      // initializeAlarms đã gọi checkImmediateReminders
+      await initializeAlarms();
+      return { success: true };
+
+    case 'testNotification':
+      // Alarm lặp sẽ tự dừng nếu ngoài khung giờ / đã chấm công
+      await startReminder(request.type);
+      return { success: true };
+
+    case 'getTimekeepingStatus': {
+      const result = await chrome.storage.local.get(['timekeepingData']);
+      return { data: result.timekeepingData || timekeepingData };
+    }
+
+    case 'timekeepingDataUpdated':
+      await onTimekeepingData(request.data);
+      return { success: true };
+
+    case 'refreshTimekeeping': {
+      await fetchTimekeepingFromFastwork();
+      const result = await chrome.storage.local.get(['timekeepingData']);
+      return { data: result.timekeepingData || timekeepingData };
+    }
+
+    case 'openFastwork':
+      chrome.tabs.create({ url: FASTWORK_URL });
+      return { success: true };
+
+    case 'dismissReminder':
+      await dismissReminder(request.type);
+      return { success: true };
+
+    case 'snoozeReminder': {
+      const minutes = request.minutes || (await getConfig()).snoozeMinutes;
+      await snoozeReminder(request.type, minutes);
+      return { success: true };
+    }
+
+    case 'skipReminderToday':
+      await skipReminderToday(request.type);
+      return { success: true };
+
+    case 'getOverrides':
+      return { overrides: await updateOverrides() };
+
+    case 'clearSkips':
+      await updateOverrides(o => { o.skip = {}; });
+      await checkImmediateReminders();
+      return { success: true };
+
+    case 'getConfig':
+      return { config: await getConfig(), defaults: normalizeConfig(null) };
+
+    case 'saveConfig': {
+      const config = normalizeConfig(request.config);
+      await chrome.storage.sync.set({ config });
+      // Tạo lại alarm theo cấu hình mới (polling, lặp lại, nhắc đồng bộ)
+      await initializeAlarms();
+      return { success: true, config };
+    }
+
+    case 'resetConfig':
+      await chrome.storage.sync.remove('config');
+      await initializeAlarms();
+      return { success: true, config: normalizeConfig(null) };
+
+    case 'getApiStatus': {
+      const [local, session] = await Promise.all([
+        chrome.storage.local.get(['fastworkApi', 'timekeepingData']),
+        chrome.storage.session.get(['fastworkApiHeaders', 'fastworkApiPageHeaderNames'])
+      ]);
+      const data = local.timekeepingData;
+      return {
+        api: local.fastworkApi || null,
+        pageOrigin: (local.fastworkApi && local.fastworkApi.pageOrigin) || DEFAULT_PAGE_ORIGIN,
+        headerNames: Object.keys(session.fastworkApiHeaders || {}),
+        pageHeaderNames: session.fastworkApiPageHeaderNames || [],
+        lastSource: data && data.found ? (data.source || 'page') : null,
+        lastUpdated: (data && data.lastUpdated) || null
+      };
+    }
+
+    case 'setApiConfigFromUrl': {
+      const api = parseTimesheetUrl((request.url || '').trim());
+      if (!api) return { success: false };
+      await chrome.storage.local.set({ fastworkApi: api });
+      return { success: true, api };
+    }
+
+    case 'learnApiConfig':
+      return { success: await learnApiConfig() };
+
+    case 'clearApiConfig':
+      await chrome.storage.local.remove('fastworkApi');
+      await chrome.storage.session.remove(['fastworkApiHeaders', 'fastworkApiPageHeaderNames']);
+      return { success: true };
+
+    case 'testApi': {
+      const { data, error, url } = await requestTimesheetApi();
+      if (data) await onTimekeepingData(data);
+      return { success: !!data, data, error, url };
+    }
+
+    default:
+      return undefined;
+  }
+}
+
 // Lắng nghe message
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'getExtensionEnabled') {
-    isExtensionEnabled().then((enabled) => {
-      sendResponse({ enabled });
+  handleMessage(request)
+    .then(sendResponse)
+    .catch((e) => {
+      console.error(`[message] Lỗi khi xử lý ${request.action}:`, e);
+      sendResponse({ success: false });
     });
-    return true;
-  }
-
-  if (request.action === 'setExtensionEnabled') {
-    chrome.storage.sync.set({ extensionEnabled: request.enabled }, async () => {
-      if (request.enabled) {
-        console.log('[toggle] Extension BẬT - khởi tạo lại alarms');
-        await initializeAlarms();
-      } else {
-        console.log('[toggle] Extension TẮT - xóa alarms và dừng thông báo');
-        // Xóa tất cả alarms trừ watchdog
-        const allAlarms = await chrome.alarms.getAll();
-        for (const alarm of allAlarms) {
-          if (alarm.name !== 'watchdog') {
-            await chrome.alarms.clear(alarm.name);
-          }
-        }
-        // Reset pending notifications
-        Object.keys(pendingNotifications).forEach(k => pendingNotifications[k] = false);
-        saveState();
-        // Đóng cửa sổ reminder nếu đang mở
-        await closeAllReminderPopups();
-      }
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
-  if (request.action === 'getSettings') {
-    getSettings().then((settings) => {
-      sendResponse({ settings });
-    });
-    return true;
-  }
-
-  if (request.action === 'saveSettings') {
-    saveSettings(request.settings).then(async () => {
-      await initializeAlarms();
-      // Kiểm tra ngay sau khi lưu - không chờ watchdog
-      const settings = await getSettings();
-      await checkImmediateReminders(settings);
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
-  if (request.action === 'testNotification') {
-    pendingNotifications[request.type] = true;
-    showReminderPopup(request.type);
-    startRepeatAlarm(request.type);
-    sendResponse({ success: true });
-    return true;
-  }
-
-  if (request.action === 'getTimekeepingStatus') {
-    chrome.storage.local.get(['timekeepingData'], (result) => {
-      sendResponse({ data: result.timekeepingData || timekeepingData });
-    });
-    return true;
-  }
-
-  if (request.action === 'timekeepingDataUpdated') {
-    timekeepingData = {
-      ...request.data,
-      lastUpdated: new Date().toISOString()
-    };
-    chrome.storage.local.set({ timekeepingData });
-
-    // Đóng cửa sổ ẩn nếu đã nhận được dữ liệu
-    if (request.data.found) {
-      closeHiddenFetchWindow();
-    }
-
-    // Kiểm tra và dừng thông báo nếu đã chấm công (dùng effective mapping)
-    const eff = getEffectiveTimekeeping(timekeepingData);
-    if (isEffectiveDone(eff.morningCheckIn) && pendingNotifications.morningIn) {
-      dismissReminder('morningIn');
-    }
-    if (isEffectiveDone(eff.morningCheckOut) && pendingNotifications.noon) {
-      dismissReminder('noon');
-    }
-    if (isEffectiveDone(eff.afternoonCheckIn) && pendingNotifications.afternoonIn) {
-      dismissReminder('afternoonIn');
-    }
-    if (isEffectiveDone(eff.afternoonCheckOut) && pendingNotifications.evening) {
-      dismissReminder('evening');
-    }
-
-    // Cập nhật tần suất polling
-    updatePollingFrequency();
-
-    sendResponse({ success: true });
-    return true;
-  }
-
-  if (request.action === 'refreshTimekeeping') {
-    fetchTimekeepingFromFastwork().then(() => {
-      sendResponse({ data: timekeepingData });
-    });
-    return true;
-  }
-
-  if (request.action === 'openFastwork') {
-    chrome.tabs.create({ url: FASTWORK_URL });
-    sendResponse({ success: true });
-    return true;
-  }
-
-  if (request.action === 'dismissReminder') {
-    dismissReminder(request.type);
-    sendResponse({ success: true });
-    return true;
-  }
+  return true; // Async response
 });

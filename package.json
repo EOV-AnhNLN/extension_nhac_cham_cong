@@ -1,0 +1,7 @@
+{
+  "name": "extension-thong-bao",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

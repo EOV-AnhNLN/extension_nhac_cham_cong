@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cài Đặt Nâng Cao - Nhắc Nhở Chấm Công</title>
+    <link rel="stylesheet" href="popup.css">
+    <link rel="stylesheet" href="options.css">
+</head>
+
+<body>
+    <div class="container options-page">
+        <header>
+            <h1>⚙️ Cài Đặt Nâng Cao</h1>
+            <p class="subtitle">Giờ nhắc từng buổi chỉnh trong popup của tiện ích</p>
+        </header>
+
+        <!-- Nhắc nhở -->
+        <section class="settings-card">
+            <h2>🔔 Nhắc nhở</h2>
+            <label class="field">
+                <span class="field-label">Lặp lại popup mỗi</span>
+                <span class="field-input"><input type="number" id="repeatIntervalMinutes" min="1" max="60"> phút</span>
+            </label>
+            <label class="field">
+                <span class="field-label">Bấm "OK" → kiểm tra lại sau</span>
+                <span class="field-input"><input type="number" id="recheckAfterDismissMinutes" min="1" max="60"> phút</span>
+            </label>
+            <label class="field">
+                <span class="field-label">Nút tạm hoãn</span>
+                <span class="field-input"><input type="number" id="snoozeMinutes" min="1" max="120"> phút</span>
+            </label>
+
+            <h3>Thời gian nhắc tối đa sau giờ cài đặt</h3>
+            <p class="hint">Quá khoảng này mà chưa chấm thì thôi nhắc. 0 = nhắc đến hết ngày.</p>
+            <label class="field">
+                <span class="field-label">🌅 Checkin sáng</span>
+                <span class="field-input"><input type="number" id="window-morningIn" min="0" max="1440"> phút</span>
+            </label>
+            <label class="field">
+                <span class="field-label">🌞 Checkout trưa</span>
+                <span class="field-input"><input type="number" id="window-noon" min="0" max="1440"> phút</span>
+            </label>
+            <label class="field">
+                <span class="field-label">☀️ Checkin chiều</span>
+                <span class="field-input"><input type="number" id="window-afternoonIn" min="0" max="1440"> phút</span>
+            </label>
+            <label class="field">
+                <span class="field-label">🌙 Checkout chiều</span>
+                <span class="field-input"><input type="number" id="window-evening" min="0" max="1440"> phút</span>
+            </label>
+        </section>
+
+        <!-- Âm thanh & cửa sổ -->
+        <section class="settings-card">
+            <h2>🔊 Âm thanh &amp; cửa sổ nhắc</h2>
+            <div class="field">
+                <span class="field-label">Phát tiếng bíp</span>
+                <label class="switch">
+                    <input type="checkbox" id="soundEnabled">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <label class="field">
+                <span class="field-label">Lặp tiếng bíp mỗi</span>
+                <span class="field-input"><input type="number" id="soundIntervalSeconds" min="2" max="60"> giây</span>
+            </label>
+            <label class="field">
+                <span class="field-label">Vị trí popup</span>
+                <select id="popupPosition">
+                    <option value="top-right">Góc phải trên</option>
+                    <option value="top-left">Góc trái trên</option>
+                    <option value="bottom-right">Góc phải dưới</option>
+                    <option value="bottom-left">Góc trái dưới</option>
+                    <option value="center">Giữa cửa sổ</option>
+                </select>
+            </label>
+        </section>
+
+        <!-- Đồng bộ -->
+        <section class="settings-card">
+            <h2>🔄 Đồng bộ dữ liệu</h2>
+            <label class="field">
+                <span class="field-label">Đang chờ chấm công: kiểm tra mỗi</span>
+                <span class="field-input"><input type="number" id="fastPollSeconds" min="30" max="600"> giây</span>
+            </label>
+            <label class="field">
+                <span class="field-label">Ngoài giờ nhắc: kiểm tra mỗi</span>
+                <span class="field-input"><input type="number" id="slowPollMinutes" min="5" max="240"> phút</span>
+            </label>
+            <div class="field">
+                <span class="field-label">Nhắc đồng bộ nếu chưa có dữ liệu hôm nay</span>
+                <label class="switch">
+                    <input type="checkbox" id="syncCheckEnabled">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <label class="field">
+                <span class="field-label">Giờ kiểm tra đồng bộ</span>
+                <input type="time" id="syncCheckTime">
+            </label>
+        </section>
+
+        <!-- API FastWork -->
+        <section class="settings-card">
+            <h2>🌐 API FastWork</h2>
+            <div class="field">
+                <span class="field-label">Ưu tiên gọi API JSON (không mở tab)</span>
+                <label class="switch">
+                    <input type="checkbox" id="useApi">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="api-status">
+                <div class="api-row"><span>Mã công ty</span><code id="api-company">---</code></div>
+                <div class="api-row"><span>Email</span><code id="api-email">---</code></div>
+                <div class="api-row"><span>Gửi kèm Origin</span><code id="api-origin">---</code></div>
+                <div class="api-row"><span>Header gửi lại</span><code id="api-headers">---</code></div>
+                <div class="api-row"><span>Header trang FastWork gửi</span><code id="api-page-headers">---</code></div>
+                <div class="api-row"><span>Lấy dữ liệu gần nhất</span><code id="api-last">---</code></div>
+            </div>
+            <p class="hint">Không cần nhập gì: tiện ích tự mở ngầm trang chấm công FastWork khi cần và lấy cấu hình
+                từ chính request của trang. Bấm "Kết nối FastWork" nếu muốn kết nối ngay.</p>
+            <div class="button-row">
+                <button class="secondary-btn" id="api-learn">🔗 Kết nối FastWork</button>
+                <button class="secondary-btn" id="api-test">🧪 Thử gọi API</button>
+                <button class="secondary-btn danger" id="api-clear">🗑️ Quên cấu hình</button>
+            </div>
+            <details class="api-manual">
+                <summary>Nhập URL thủ công (khi kết nối tự động không được)</summary>
+                <p class="hint">Dán URL <code>fwhrm.fastwork.vn/TimesheetMobile/...</code> lấy ở DevTools → Network.</p>
+                <div class="api-url">
+                    <input type="url" id="api-url" placeholder="https://fwhrm.fastwork.vn/TimesheetMobile/...?email=...">
+                    <button class="secondary-btn" id="api-url-save">Dùng URL</button>
+                </div>
+            </details>
+        </section>
+
+        <div class="button-row">
+            <button class="secondary-btn" id="reset-btn">↺ Khôi phục mặc định</button>
+            <button class="save-btn" id="save-btn">💾 Lưu cấu hình</button>
+        </div>
+        <div class="status" id="status"></div>
+    </div>
+
+    <script src="logic.js"></script>
+    <script src="options.js"></script>
+</body>
+
+</html>

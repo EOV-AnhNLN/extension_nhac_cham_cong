@@ -18,12 +18,24 @@ const statusEl = document.getElementById('status');
 const timekeepingStatusEl = document.getElementById('timekeeping-status');
 const refreshBtn = document.getElementById('refresh-btn');
 const openFastworkBtn = document.getElementById('open-fastwork');
+const skipInfoEl = document.getElementById('skip-info');
+const skipTextEl = document.getElementById('skip-text');
+const clearSkipsBtn = document.getElementById('clear-skips');
+
+// Tên hiển thị của từng loại nhắc
+const REMINDER_LABELS = {
+    morningIn: 'checkin sáng',
+    noon: 'checkout trưa',
+    afternoonIn: 'checkin chiều',
+    evening: 'checkout chiều'
+};
 
 // Load khi popup mở
 document.addEventListener('DOMContentLoaded', () => {
     loadExtensionEnabled();
     loadSettings();
     loadTimekeepingStatus();
+    loadSkips();
 });
 
 // Lắng nghe sự kiện
@@ -35,6 +47,32 @@ testAfternoonInBtn.addEventListener('click', () => testNotification('afternoonIn
 testEveningBtn.addEventListener('click', () => testNotification('evening'));
 refreshBtn.addEventListener('click', refreshTimekeeping);
 openFastworkBtn.addEventListener('click', openFastwork);
+clearSkipsBtn.addEventListener('click', clearSkips);
+document.getElementById('open-options').addEventListener('click', () => chrome.runtime.openOptionsPage());
+
+// Load các nhắc nhở đã bỏ qua hôm nay
+function loadSkips() {
+    chrome.runtime.sendMessage({ action: 'getOverrides' }, (response) => {
+        const skip = (response && response.overrides && response.overrides.skip) || {};
+        const skippedTypes = Object.keys(REMINDER_LABELS).filter(type => skip[type]);
+        if (skippedTypes.length === 0) {
+            skipInfoEl.classList.remove('visible');
+            return;
+        }
+        skipTextEl.textContent = '🏖️ Hôm nay bỏ qua: ' + skippedTypes.map(type => REMINDER_LABELS[type]).join(', ');
+        skipInfoEl.classList.add('visible');
+    });
+}
+
+// Bật lại các nhắc nhở đã bỏ qua hôm nay
+function clearSkips() {
+    chrome.runtime.sendMessage({ action: 'clearSkips' }, (response) => {
+        if (response && response.success) {
+            loadSkips();
+            showStatus('🔔 Đã bật lại nhắc nhở hôm nay!', 'success');
+        }
+    });
+}
 
 // Load cài đặt
 function loadSettings() {

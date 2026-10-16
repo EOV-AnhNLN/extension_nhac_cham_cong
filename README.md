@@ -5,10 +5,14 @@
 ## 🌟 Chức năng nổi bật
 
 - 🔄 **Đồng bộ tự động**: Tự động kết nối và lấy dữ liệu trạng thái chấm công trực tiếp từ trang web FastWork.
+  - Ưu tiên gọi API JSON `fwhrm.fastwork.vn/TimesheetMobile` (không mở tab). Mã công ty, email và header đăng nhập được tự học khi bạn mở trang chấm công FastWork lần đầu (hoặc bấm "Kết nối FastWork" trong Cài đặt nâng cao). Token chỉ lưu trong bộ nhớ phiên, tắt trình duyệt là xoá.
+  - Nếu API lỗi (chưa học được cấu hình, hết phiên đăng nhập), tiện ích quay về cách cũ: đọc bảng chấm công trên trang.
 - 🌞 **Nhắc nhở buổi trưa**: Mặc định cảnh báo lúc **12:00** để nhắc bạn chấm công ra ăn trưa.
 - 🌙 **Nhắc nhở buổi chiều**: Mặc định cảnh báo lúc **17:00** để nhắc bạn chấm công trước khi ra về.
 - 🔊 **Cảnh báo âm thanh & hiển thị**: Hiển thị popup ngay trên màn hình và phát ra âm thanh (tiếng bíp) để đảm bảo bạn không bỏ lỡ.
 - 🔁 **Nhắc nhở lặp lại**: Nếu bạn lỡ "Bỏ qua", hệ thống sẽ tự động kiểm tra lại và nhắc nhở sau 1 phút nếu bạn chưa thực sự chấm công.
+- ⏰ **Tạm hoãn / bỏ qua**: Trên popup nhắc có nút "10 phút nữa" và "Nghỉ sáng nay" / "Nghỉ chiều nay" / "Bỏ qua hôm nay". Có thể bật lại trong giao diện tiện ích.
+- 🏷️ **Badge trên icon**: `!` đang nhắc, `2/4` số lần đã chấm hôm nay, `✓` đủ, `?` chưa có dữ liệu, `OFF` tiện ích đang tắt. Rê chuột vào icon để xem giờ chấm.
 - ⚙️ **Tùy chỉnh linh hoạt**: Có thể thay đổi thời gian nhắc nhở hoặc bật/tắt nhắc cho từng buổi thông qua giao diện popup của tiện ích.
 - 📊 **Theo dõi trạng thái**: Hiển thị trạng thái chấm công thực tế của ngày hôm nay (giờ vào/ra ca sáng và chiều) trực tiếp trên trình duyệt mà không cần mở FastWork.
 
@@ -41,11 +45,28 @@
 3. **Thay đổi thời gian**: Nhấp vào ô thời gian (mặc định là `12:00` và `17:00`) để điều chỉnh theo đúng lịch làm việc của công ty bạn.
 4. Nhấn nút **Lưu Cài Đặt** 💾 để hệ thống ghi nhận lịch nhắc nhở mới.
 
+### Cài đặt nâng cao
+
+Nhấn **⚙️ Cài đặt nâng cao** ở cuối popup (hoặc `chrome://extensions` → Chi tiết → Tùy chọn tiện ích):
+
+- **Nhắc nhở**: lặp lại popup mỗi bao nhiêu phút, kiểm tra lại sau khi bấm OK, số phút của nút tạm hoãn, nhắc tối đa bao lâu sau giờ cài đặt của từng buổi.
+- **Âm thanh & cửa sổ**: bật/tắt tiếng bíp, chu kỳ bíp, vị trí popup (góc nào của cửa sổ trình duyệt).
+- **Đồng bộ**: tần suất kiểm tra khi đang chờ chấm công / ngoài giờ nhắc, giờ nhắc đồng bộ.
+- **API FastWork**: bật/tắt gọi API, xem cấu hình đã học, dán URL thủ công, thử gọi API, quên cấu hình.
+
 ### Kiểm tra thử nhắc nhở (Test)
 
 Bạn có thể nhấn vào nút **Test Thông Báo** 🔔 ở mỗi buổi. Một cửa sổ popup cảnh báo sẽ hiện lên ở góc màn hình kèm theo âm thanh để bạn hình dung được cách mà hệ thống thông báo.
 
 *Lưu ý: Bạn có thể tắt tiếng bíp của cửa sổ nhắc nhở bằng cách nhấn "Đã hiểu, đóng lại" hoặc nhấn "Mở FastWork" để xác nhận đi chuyển trang.*
+
+## 🧪 Phát triển
+
+Logic quyết định nhắc nằm ở `logic.js` (hàm thuần, không dùng `chrome.*`). Chạy unit test (Node 18+):
+
+```bash
+npm test
+```
 
 ## 🔒 Thông tin quyền sử dụng (Permissions)
 Tiện ích này yêu cầu quyền truy cập vào `app.fastwork.vn` để thu thập thời gian thực trạng thái báo danh của cá nhân, đảm bảo không thu thập thông tin cá nhân ở những trang web khác.

@@ -1,0 +1,196 @@
+/* Trang Cài đặt nâng cao (dùng chung popup.css) */
+body {
+  min-height: 100vh;
+  padding: 32px 16px;
+}
+
+.options-page {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.subtitle {
+  margin-top: 6px;
+  font-size: 13px;
+  color: #666;
+}
+
+.settings-card {
+  background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.settings-card h2 {
+  font-size: 15px;
+  color: #333;
+  margin-bottom: 12px;
+}
+
+.settings-card h3 {
+  font-size: 13px;
+  color: #444;
+  margin: 16px 0 4px;
+}
+
+.hint {
+  font-size: 12px;
+  color: #777;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
+.field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  font-size: 13px;
+  color: #444;
+}
+
+.field:last-child {
+  border-bottom: none;
+}
+
+.field-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: #666;
+}
+
+.field input[type="number"],
+.field input[type="time"],
+.field select {
+  padding: 6px 10px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #333;
+  background: white;
+}
+
+.field input[type="number"] {
+  width: 80px;
+  text-align: right;
+}
+
+.field input:focus,
+.field select:focus,
+.api-url input:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.api-status {
+  background: white;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0 12px;
+}
+
+.api-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: #555;
+}
+
+.api-row code {
+  font-family: 'Consolas', monospace;
+  color: #333;
+  word-break: break-all;
+  text-align: right;
+}
+
+.api-url {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.api-url input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.options-page .status {
+  word-break: break-word;
+  text-align: left;
+}
+
+.api-manual {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #666;
+}
+
+.api-manual summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.button-row > * {
+  flex: 1;
+}
+
+.button-row .save-btn {
+  margin-top: 0;
+}
+
+.secondary-btn {
+  padding: 10px 14px;
+  background: transparent;
+  border: 2px solid #667eea;
+  border-radius: 8px;
+  color: #667eea;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.secondary-btn:hover {
+  background: #667eea;
+  color: white;
+}
+
+.secondary-btn.danger {
+  border-color: #e57373;
+  color: #c62828;
+}
+
+.secondary-btn.danger:hover {
+  background: #e57373;
+  color: white;
+}
+
+@media (max-width: 480px) {
+  .field {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .button-row {
+    flex-direction: column;
+  }
+}
